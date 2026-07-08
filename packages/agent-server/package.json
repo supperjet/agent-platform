@@ -1,0 +1,26 @@
+{
+  "name": "@agent-platform/agent-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/start-server.ts",
+    "dev:worker": "tsx watch src/start-worker.ts",
+    "start": "node dist/start-server.js",
+    "start:worker": "node dist/start-worker.js",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@agent-platform/agent-core": "0.1.0",
+    "bullmq": "^5.79.2",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "ioredis": "^5.10.1",
+    "mysql2": "^3.22.5",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.79.10"
+  }
+}

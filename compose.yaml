@@ -1,0 +1,123 @@
+services:
+  mysql:
+    image: mysql:5.7.44
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: root-dev-password
+      MYSQL_DATABASE: agent_platform
+      MYSQL_USER: agent
+      MYSQL_PASSWORD: agent-dev-password
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - agent-platform-mysql:/var/lib/mysql
+      - ./packages/agent-server/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - agent-platform-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  migrate:
+    image: mysql:5.7.44
+    platform: linux/amd64
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_PWD: root-dev-password
+    volumes:
+      - ./packages/agent-server/migrations:/migrations:ro
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        for migration in /migrations/*.sql; do
+          echo "Applying $${migration}";
+          mysql --host=mysql --user=root agent_platform < "$${migration}";
+        done
+    restart: "no"
+
+  server:
+    build:
+      context: .
+    command: ["npm", "run", "dev:server"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      STORAGE_MODE: dataBase
+      MYSQL_URL: mysql://agent:agent-dev-password@mysql:3306/agent_platform
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${SERVER_PORT:-3000}:3000"
+    volumes:
+      - ./packages:/app/packages
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/openapi.json').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+    command: ["npm", "run", "dev:worker"]
+    environment:
+      MYSQL_URL: mysql://agent:agent-dev-password@mysql:3306/agent_platform
+      REDIS_URL: redis://redis:6379
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?Set DEEPSEEK_API_KEY in .env}
+      DEEPSEEK_MODEL_ID: ${DEEPSEEK_MODEL_ID:-deepseek-v4-flash}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./packages:/app/packages
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+    command: ["npm", "run", "dev", "--workspace", "@agent-platform/agent-client", "--", "--host", "0.0.0.0"]
+    environment:
+      AGENT_SERVER_URL: http://server:3000
+    ports:
+      - "${CLIENT_PORT:-5173}:5173"
+    volumes:
+      - ./packages:/app/packages
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  agent-platform-mysql:
+  agent-platform-redis:

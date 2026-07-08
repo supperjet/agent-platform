@@ -1,0 +1,429 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  AgentRuntime,
+  AgentRuntimeFactory,
+  type AgentConversationState,
+  type AgentExecutionOutcome,
+  type AgentRuntimeCommand
+} from "@agent-platform/agent-core";
+import {
+  SessionStore,
+  type SessionLeaseRequest,
+  type CreateSessionResult,
+  type SessionRecord
+} from "../session/contracts.js";
+import { StoredSessionManager } from "../session/mysql/stored-session-manager.js";
+
+test("creates a Session and persists Agent state after a successful prompt", async () => {
+  const sessions = new MemorySessionStore();
+  const factory = new FakeRuntimeFactory();
+  const manager = new StoredSessionManager(factory, sessions, { now: () => 2_000 });
+
+  const receipt = await manager.prompt("session-1", "hello", "command-1");
+  const stored = await sessions.find("session-1");
+
+  assert.equal(receipt.outcome.status, "succeeded");
+  assert.equal(stored?.status, "idle");
+  assert.equal(stored?.version, 1);
+  assert.equal(stored?.messageCount, 1);
+  assert.deepEqual(stored?.agentState?.payload, { prompts: ["hello"] });
+});
+
+test("restores persisted Agent state before executing the next prompt", async () => {
+  const original = sessionRecord({
+    version: 5,
+    agentState: state({ prompts: ["first"] }),
+    messageCount: 1
+  });
+  const sessions = new MemorySessionStore(original);
+  const factory = new FakeRuntimeFactory();
+  const manager = new StoredSessionManager(factory, sessions, { now: () => 3_000 });
+
+  await manager.prompt("session-1", "second", "command-2");
+
+  assert.deepEqual(factory.restoredStates, [original.agentState]);
+  assert.deepEqual((await sessions.find("session-1"))?.agentState?.payload, {
+    prompts: ["first", "second"]
+  });
+  assert.equal((await sessions.find("session-1"))?.version, 7);
+});
+
+test("preserves the previous Agent state when execution fails", async () => {
+  const originalState = state({ prompts: ["safe"] });
+  const sessions = new MemorySessionStore(sessionRecord({ agentState: originalState }));
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "failed", errorCode: "MODEL_FAILED", message: "failed" }),
+    sessions,
+    { now: () => 4_000 }
+  );
+
+  const receipt = await manager.prompt("session-1", "not persisted", "command-failed");
+  const stored = await sessions.find("session-1");
+
+  assert.equal(receipt.outcome.status, "failed");
+  assert.equal(stored?.status, "failed");
+  assert.equal(stored?.executingCommandId, undefined);
+  assert.deepEqual(stored?.agentState, originalState);
+});
+
+test("marks the Session failed while preserving state when the runtime throws", async () => {
+  const originalState = state({ prompts: ["safe"] });
+  const sessions = new MemorySessionStore(sessionRecord({ agentState: originalState }));
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory(new Error("runtime crashed")),
+    sessions,
+    { now: () => 4_500 }
+  );
+
+  await assert.rejects(
+    manager.prompt("session-1", "not persisted", "command-crashed"),
+    /runtime crashed/
+  );
+
+  const stored = await sessions.find("session-1");
+  assert.equal(stored?.status, "failed");
+  assert.equal(stored?.executingCommandId, undefined);
+  assert.deepEqual(stored?.agentState, originalState);
+});
+
+test("routes control commands to the runtime active on this Worker", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const factory = new FakeRuntimeFactory({ status: "succeeded" }, gate);
+  const manager = new StoredSessionManager(
+    factory,
+    new MemorySessionStore(),
+    { now: () => 5_000 }
+  );
+
+  const prompt = manager.prompt("session-1", "hello", "command-1");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const abort = await manager.abort("session-1");
+  release();
+  await prompt;
+
+  assert.equal(abort.accepted, true);
+  assert.deepEqual(factory.runtimes[0]?.commands.map((command) => command.type), ["prompt", "abort"]);
+});
+
+test("rejects a second Prompt while the same Session is being prepared or executed", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "succeeded" }, gate),
+    new MemorySessionStore(),
+    { now: () => 5_500 }
+  );
+
+  const first = manager.prompt("session-1", "first", "command-1");
+  await assert.rejects(
+    manager.prompt("session-1", "second", "command-2"),
+    /already processing a prompt/
+  );
+  release();
+  await first;
+});
+
+test("allows only one Worker to lease the same Session", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const sessions = new MemorySessionStore(sessionRecord());
+  const firstFactory = new FakeRuntimeFactory({ status: "succeeded" }, gate);
+  const first = new StoredSessionManager(firstFactory, sessions, {
+    now: () => 6_000,
+    leaseOwner: "worker-1",
+    leaseDurationMs: 1_000
+  });
+  const second = new StoredSessionManager(
+    new FakeRuntimeFactory(),
+    sessions,
+    { now: () => 6_000, leaseOwner: "worker-2", leaseDurationMs: 1_000 }
+  );
+
+  const execution = first.prompt("session-1", "first", "command-1");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    second.prompt("session-1", "second", "command-2"),
+    /leased by another Worker/
+  );
+
+  release();
+  await execution;
+  assert.equal((await sessions.find("session-1"))?.executingCommandId, undefined);
+});
+
+test("renews the lease so another Worker cannot take over a long Prompt", async () => {
+  let now = 20_000;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let triggerRenewal!: () => Promise<boolean>;
+  let leaseOwned = true;
+  const sessions = new MemorySessionStore(sessionRecord());
+  const first = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "succeeded" }, gate),
+    sessions,
+    {
+      now: () => now,
+      leaseOwner: "worker-1",
+      leaseDurationMs: 300,
+      startLeaseRenewal: (renew) => {
+        triggerRenewal = async () => {
+          leaseOwned = leaseOwned && await renew();
+          return leaseOwned;
+        };
+        return { stop: async () => leaseOwned };
+      }
+    }
+  );
+  const second = new StoredSessionManager(
+    new FakeRuntimeFactory(),
+    sessions,
+    { now: () => now, leaseOwner: "worker-2", leaseDurationMs: 300 }
+  );
+
+  const execution = first.prompt("session-1", "long", "command-1");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  now = 20_200;
+  assert.equal(await triggerRenewal(), true);
+  now = 20_400;
+  await assert.rejects(
+    second.prompt("session-1", "overlap", "command-2"),
+    /leased by another Worker/
+  );
+
+  release();
+  await execution;
+});
+
+test("aborts the runtime and refuses to save after lease renewal is lost", async () => {
+  let now = 30_000;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let triggerRenewal!: () => Promise<void>;
+  let leaseOwned = true;
+  const factory = new FakeRuntimeFactory({ status: "succeeded" }, gate);
+  const manager = new StoredSessionManager(factory, new MemorySessionStore(sessionRecord()), {
+    now: () => now,
+    leaseOwner: "worker-1",
+    leaseDurationMs: 100,
+    startLeaseRenewal: (renew, _interval, onLeaseLost) => {
+      triggerRenewal = async () => {
+        leaseOwned = await renew();
+        if (!leaseOwned) onLeaseLost();
+      };
+      return { stop: async () => leaseOwned };
+    }
+  });
+
+  const execution = manager.prompt("session-1", "long", "command-1");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  now = 30_200;
+  await triggerRenewal();
+  release();
+
+  await assert.rejects(execution, /lease was lost/);
+  assert.deepEqual(factory.runtimes[0]?.commands.map((command) => command.type), ["prompt", "abort"]);
+});
+
+test("fences an old Worker after its lease expires and another Worker takes over", async () => {
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const sessions = new MemorySessionStore(sessionRecord());
+  const first = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "succeeded" }, firstGate),
+    sessions,
+    { now: () => 10_000, leaseOwner: "worker-old", leaseDurationMs: 500 }
+  );
+  const replacement = new StoredSessionManager(
+    new FakeRuntimeFactory(),
+    sessions,
+    { now: () => 11_000, leaseOwner: "worker-new", leaseDurationMs: 500 }
+  );
+
+  const oldExecution = first.prompt("session-1", "old", "command-old");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await replacement.prompt("session-1", "new", "command-new");
+  releaseFirst();
+
+  await assert.rejects(oldExecution, /changed while saving version/);
+  assert.deepEqual((await sessions.find("session-1"))?.agentState?.payload, { prompts: ["new"] });
+});
+
+test("reads Session snapshots from durable storage", async () => {
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory(),
+    new MemorySessionStore(sessionRecord({ status: "failed", messageCount: 3 })),
+    { now: () => 6_000 }
+  );
+
+  assert.deepEqual(await manager.snapshot("session-1"), {
+    sessionId: "session-1",
+    status: "failed",
+    createdAt: 1_000,
+    lastActiveAt: 1_000,
+    messageCount: 3,
+    modelId: "test-model"
+  });
+});
+
+class MemorySessionStore extends SessionStore {
+  private readonly records = new Map<string, SessionRecord>();
+
+  constructor(initial?: SessionRecord) {
+    super();
+    if (initial) this.records.set(initial.sessionId, structuredClone(initial));
+  }
+
+  async createIfAbsent(session: SessionRecord): Promise<CreateSessionResult> {
+    const existing = this.records.get(session.sessionId);
+    if (existing) return { created: false, session: structuredClone(existing) };
+    this.records.set(session.sessionId, structuredClone(session));
+    return { created: true, session: structuredClone(session) };
+  }
+
+  async find(sessionId: string) {
+    const session = this.records.get(sessionId);
+    return session ? structuredClone(session) : undefined;
+  }
+
+  async acquireExecutionLease(lease: SessionLeaseRequest) {
+    const current = this.records.get(lease.sessionId);
+    if (
+      !current
+      || current.status === "closed"
+      || (current.leaseUntil !== undefined && current.leaseUntil > lease.now)
+    ) {
+      return undefined;
+    }
+    const leased: SessionRecord = {
+      ...withoutLease(current),
+      status: "running",
+      version: current.version + 1,
+      executingCommandId: lease.commandId,
+      leaseOwner: lease.leaseOwner,
+      leaseUntil: lease.leaseUntil,
+      lastActiveAt: lease.now,
+      updatedAt: lease.now
+    };
+    this.records.set(lease.sessionId, structuredClone(leased));
+    return structuredClone(leased);
+  }
+
+  async renewExecutionLease(lease: SessionLeaseRequest) {
+    const current = this.records.get(lease.sessionId);
+    if (
+      !current
+      || current.executingCommandId !== lease.commandId
+      || current.leaseOwner !== lease.leaseOwner
+      || current.leaseUntil === undefined
+      || current.leaseUntil <= lease.now
+    ) {
+      return false;
+    }
+    this.records.set(lease.sessionId, {
+      ...current,
+      leaseUntil: lease.leaseUntil,
+      updatedAt: lease.now
+    });
+    return true;
+  }
+
+  async save(session: SessionRecord, expectedVersion: number) {
+    const current = this.records.get(session.sessionId);
+    if (!current || current.version !== expectedVersion) return false;
+    this.records.set(session.sessionId, structuredClone(session));
+    return true;
+  }
+}
+
+function withoutLease(session: SessionRecord) {
+  const {
+    executingCommandId: _executingCommandId,
+    leaseOwner: _leaseOwner,
+    leaseUntil: _leaseUntil,
+    ...record
+  } = session;
+  return record;
+}
+
+class FakeRuntimeFactory extends AgentRuntimeFactory {
+  readonly restoredStates: Array<AgentConversationState | undefined> = [];
+  readonly runtimes: FakeRuntime[] = [];
+
+  constructor(
+    private readonly result: AgentExecutionOutcome | Error = { status: "succeeded" },
+    private readonly promptGate?: Promise<void>
+  ) {
+    super();
+  }
+
+  create(_sessionId: string, restoredState?: AgentConversationState) {
+    this.restoredStates.push(restoredState);
+    const runtime = new FakeRuntime(restoredState, this.result, this.promptGate);
+    this.runtimes.push(runtime);
+    return runtime;
+  }
+}
+
+class FakeRuntime extends AgentRuntime {
+  readonly commands: AgentRuntimeCommand[] = [];
+  private readonly prompts: string[];
+
+  constructor(
+    restoredState: AgentConversationState | undefined,
+    private readonly result: AgentExecutionOutcome | Error,
+    private readonly promptGate?: Promise<void>
+  ) {
+    super();
+    const payload = restoredState?.payload as { prompts?: string[] } | undefined;
+    this.prompts = [...(payload?.prompts ?? [])];
+  }
+
+  async execute(command: AgentRuntimeCommand) {
+    this.commands.push(command);
+    if (command.type === "prompt") {
+      this.prompts.push(command.text);
+      await this.promptGate;
+      if (this.result instanceof Error) throw this.result;
+      return this.result;
+    }
+    return { status: "succeeded" } as const;
+  }
+
+  snapshot() {
+    return {
+      messageCount: this.prompts.length,
+      transcriptRoles: this.prompts.map(() => "user"),
+      isRunning: false,
+      modelId: "test-model"
+    };
+  }
+
+  exportState() {
+    return state({ prompts: [...this.prompts] });
+  }
+
+  subscribe() {
+    return () => {};
+  }
+}
+
+function state(payload: unknown): AgentConversationState {
+  return { schemaVersion: 1, modelId: "test-model", payload };
+}
+
+function sessionRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
+  return {
+    sessionId: "session-1",
+    status: "idle",
+    modelId: "test-model",
+    agentState: state({ prompts: [] }),
+    messageCount: 0,
+    version: 0,
+    createdAt: 1_000,
+    lastActiveAt: 1_000,
+    updatedAt: 1_000,
+    ...overrides
+  };
+}

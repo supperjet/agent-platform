@@ -1,0 +1,32 @@
+{
+  "name": "agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "dev:server": "npm run dev --workspace @agent-platform/agent-server",
+    "dev:worker": "npm run dev:worker --workspace @agent-platform/agent-server",
+    "dev:client": "npm run dev --workspace @agent-platform/agent-client",
+    "dev:up": "docker compose up --build",
+    "dev:down": "docker compose down",
+    "db:up": "docker compose up -d --wait mysql",
+    "db:down": "docker compose down",
+    "db:migrate": "sh packages/agent-server/scripts/migrate-mysql.sh",
+    "test:mysql": "MYSQL_INTEGRATION_URL=${MYSQL_INTEGRATION_URL:-mysql://agent:agent-dev-password@127.0.0.1:3307/agent_platform} tsx --test packages/agent-server/src/test/*.integration.test.ts",
+    "test:redis": "REDIS_INTEGRATION_URL=${REDIS_INTEGRATION_URL:-redis://127.0.0.1:6380} tsx --test packages/agent-server/src/test/bullmq-execution-dispatcher.integration.test.ts",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run build && node --test packages/agent-core/dist/test/*.test.js packages/agent-client/dist/*.test.js packages/agent-server/dist/test/*.test.js",
+    "check": "npm run typecheck && npm run test"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
