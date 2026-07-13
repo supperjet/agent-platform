@@ -1,5 +1,4 @@
 import { config } from "dotenv";
-import { createDeepSeekRuntime, summarizeModel } from "./runtime/deepseek.js";
 import { createApplication } from "./bootstrap.js";
 import {
   createPinoExecutionLogger,
@@ -24,11 +23,8 @@ async function main() {
     logStartupWarning("STORAGE_MODE=inMemory，使用内存 Adapter");
   }
 
-  const runtime = env.storageMode === "inMemory" ? createDeepSeekRuntime() : undefined;
-  if (runtime) logStartupSuccess(`模型配置加载成功（${runtime.model.provider}/${runtime.model.id}）`);
   const logger = createServerLogger({
-    level: env.logLevel,
-    ...(runtime ? { modelProvider: runtime.model.provider, modelId: runtime.model.id } : {})
+    level: env.logLevel
   });
   const executionLogger = createPinoExecutionLogger(logger);
 
@@ -42,7 +38,6 @@ async function main() {
     fastify: { loggerInstance: logger }
   } : {
     storageMode: "inMemory" as const,
-    runtime: runtime!,
     executionLogger,
     reportAssembly: logStartupSuccess,
     fastify: { loggerInstance: logger }
@@ -69,7 +64,6 @@ async function main() {
   app.log.info({
     host: env.host,
     port: env.port,
-    ...(runtime ? { model: summarizeModel(runtime.model) } : {}),
     storageMode: env.storageMode
   }, "Agent server started");
 }

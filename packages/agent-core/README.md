@@ -12,11 +12,33 @@ npm test --workspace @agent-platform/agent-core
 
 The tests use a Faux Provider and cover a real Tool-using Agent run plus conversation export/restore.
 
+Run the development CLI without server or client:
+
+```bash
+npm run dev:core -- --faux "测试运行链路"
+```
+
+Inspect the exported conversation state from the CLI:
+
+```bash
+npm run dev:core -- --faux --json --print-state "测试 conversation graph"
+```
+
+Run the Conversation v1 smoke check:
+
+```bash
+npm run smoke:conversation
+```
+
+The Conversation v1 contract lives in `src/conversation/README.md`. More CLI commands live in `src/cli/README.md`.
+
 Current source layout:
 
 ```text
 src/
 ├── contracts.ts
+├── cli/       # Development CLI for local agent-core verification
+├── conversation/ # Conversation v1 state contract, restore and projection
 ├── runtime/   # Pi runtime, runtime messages and conversation state
 ├── models/    # Provider model catalog and metadata
 ├── tools/     # Agent tools

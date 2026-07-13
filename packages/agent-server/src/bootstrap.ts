@@ -1,6 +1,5 @@
 import type { FastifyServerOptions } from "fastify";
 import type { ExecutionLogger } from "./session/contracts.js";
-import { PiAgentRuntimeFactory, type AgentModel } from "@agent-platform/agent-core";
 import { DefaultBrowserEventProjector } from "./consumer/browser-events.js";
 import { createAgentFastifyServer } from "./consumer/fastify-app.js";
 import { InMemoryPublicEventStream } from "./consumer/public-event-stream.js";
@@ -19,12 +18,10 @@ import { OutboxRelay } from "./session/outbox-relay.js";
 import { BullMqExecutionDispatcher } from "./session/redis/bullmq-execution-dispatcher.js";
 import { InProcessSessionApplication } from "./session/session-application.js";
 import { connectCommandDatabase } from "./utils/command-database.js";
-
-export type ApplicationRuntime = {
-  model: AgentModel;
-  resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
-  onApiKeyResolved?: () => void;
-};
+import {
+  createDefaultAgentRuntimeFactory,
+  type AgentProviderRuntime
+} from "./runtime/default-agent-runtime-factory.js";
 
 type CommonApplicationOptions = {
   fastify?: FastifyServerOptions;
@@ -34,7 +31,7 @@ type CommonApplicationOptions = {
 
 type InMemoryApplicationOptions = CommonApplicationOptions & {
   storageMode: "inMemory";
-  runtime: ApplicationRuntime;
+  runtime?: AgentProviderRuntime;
 };
 
 type StoreApplicationOptions = CommonApplicationOptions & {
@@ -58,13 +55,9 @@ async function createMemoryApplication(options: InMemoryApplicationOptions) {
   const browserEvents = new DefaultBrowserEventProjector();
   const publicEvents = new InMemoryPublicEventStream(browserEvents);
   report("PublicEventStream 装配成功（inMemory）");
-  const runtimeFactory = new PiAgentRuntimeFactory({
-    model: options.runtime.model,
-    resolveApiKey: options.runtime.resolveApiKey,
-    onEvent: (event) => publicEvents.accept(event),
-    ...(options.runtime.onApiKeyResolved
-      ? { onApiKeyResolved: options.runtime.onApiKeyResolved }
-      : {})
+  const runtimeFactory = createDefaultAgentRuntimeFactory({
+    ...(options.runtime ? { providerRuntime: options.runtime } : {}),
+    onEvent: (event) => publicEvents.accept(event)
   });
   report("Agent RuntimeFactory 装配成功");
 

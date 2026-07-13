@@ -1,7 +1,6 @@
 import { config } from "dotenv";
 import { createWorker } from "./bootstrap-worker.js";
 import { createPinoExecutionLogger, createServerLogger } from "./observability/pino-execution-logger.js";
-import { createDeepSeekRuntime, summarizeModel } from "./runtime/deepseek.js";
 import { readWorkerConfig } from "./utils/server-config.js";
 import { registerShutdownHandlers } from "./utils/shutdown.js";
 import { logStartupSuccess } from "./utils/startup-console.js";
@@ -12,18 +11,14 @@ await main();
 
 async function main() {
   const env = readWorkerConfig();
-  const runtime = createDeepSeekRuntime();
   const logger = createServerLogger({
     level: env.logLevel,
-    service: "agent-worker",
-    modelProvider: runtime.model.provider,
-    modelId: runtime.model.id
+    service: "agent-worker"
   });
   const worker = await createWorker({
     mysqlUrl: env.mysqlUrl,
     redisUrl: env.redisUrl,
     concurrency: env.concurrency,
-    runtime,
     executionLogger: createPinoExecutionLogger(logger),
     reportAssembly: logStartupSuccess
   });
@@ -37,7 +32,6 @@ async function main() {
   registerShutdownHandlers(() => worker.close());
   logStartupSuccess(`Agent Worker 启动成功（concurrency=${env.concurrency}）`);
   logger.info({
-    concurrency: env.concurrency,
-    model: summarizeModel(runtime.model)
+    concurrency: env.concurrency
   }, "Agent worker started");
 }

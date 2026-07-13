@@ -49,6 +49,30 @@ test("restores persisted Agent state before executing the next prompt", async ()
   assert.equal((await sessions.find("session-1"))?.version, 7);
 });
 
+test("persists entry graph Agent state across a restored prompt", async () => {
+  const originalState = graphState("session-1", ["first"]);
+  const sessions = new MemorySessionStore(sessionRecord({
+    version: 5,
+    agentState: originalState,
+    messageCount: 1
+  }));
+  const factory = new GraphRuntimeFactory();
+  const manager = new StoredSessionManager(factory, sessions, { now: () => 3_500 });
+
+  await manager.prompt("session-1", "second", "command-2");
+
+  const stored = await sessions.find("session-1");
+  const payload = assertGraphPayload(stored?.agentState?.payload);
+  assert.deepEqual(factory.restoredStates, [originalState]);
+  assert.equal("messages" in payload, false);
+  assert.equal(payload.entries.length, 2);
+  assert.equal(payload.entries[0]?.id, "session-1:entry:1");
+  assert.equal(payload.entries[1]?.id, "session-1:entry:2");
+  assert.equal(payload.entries[1]?.parentId, "session-1:entry:1");
+  assert.equal(payload.leafId, "session-1:entry:2");
+  assert.equal(stored?.messageCount, 2);
+});
+
 test("preserves the previous Agent state when execution fails", async () => {
   const originalState = state({ prompts: ["safe"] });
   const sessions = new MemorySessionStore(sessionRecord({ agentState: originalState }));
@@ -409,8 +433,122 @@ class FakeRuntime extends AgentRuntime {
   }
 }
 
+type GraphEntry = {
+  type: "message";
+  id: string;
+  parentId: string | null;
+  timestamp: string;
+  message: { role: "user"; text: string };
+};
+
+type GraphPayload = {
+  entries: GraphEntry[];
+  leafId: string | null;
+};
+
+class GraphRuntimeFactory extends AgentRuntimeFactory {
+  readonly restoredStates: Array<AgentConversationState | undefined> = [];
+
+  create(sessionId: string, restoredState?: AgentConversationState) {
+    this.restoredStates.push(restoredState);
+    return new GraphRuntime(sessionId, restoredState);
+  }
+}
+
+class GraphRuntime extends AgentRuntime {
+  private readonly entries: GraphEntry[];
+  private leafId: string | null;
+
+  constructor(
+    private readonly sessionId: string,
+    restoredState: AgentConversationState | undefined
+  ) {
+    super();
+    const payload = restoredState?.payload ? assertGraphPayload(restoredState.payload) : {
+      entries: [],
+      leafId: null
+    };
+    this.entries = structuredClone(payload.entries);
+    this.leafId = payload.leafId;
+  }
+
+  async execute(command: AgentRuntimeCommand) {
+    if (command.type === "prompt") {
+      const id = `${this.sessionId}:entry:${this.entries.length + 1}`;
+      this.entries.push({
+        type: "message",
+        id,
+        parentId: this.leafId,
+        timestamp: new Date(0).toISOString(),
+        message: { role: "user", text: command.text }
+      });
+      this.leafId = id;
+    }
+    return { status: "succeeded" } as const;
+  }
+
+  snapshot() {
+    return {
+      messageCount: this.entries.length,
+      transcriptRoles: this.entries.map((entry) => entry.message.role),
+      isRunning: false,
+      modelId: "test-model"
+    };
+  }
+
+  exportState() {
+    return graphStateFromPayload({
+      entries: this.entries,
+      leafId: this.leafId
+    });
+  }
+
+  subscribe() {
+    return () => {};
+  }
+}
+
 function state(payload: unknown): AgentConversationState {
   return { schemaVersion: 1, modelId: "test-model", payload };
+}
+
+function graphState(sessionId: string, prompts: string[]): AgentConversationState {
+  let parentId: string | null = null;
+  const entries = prompts.map((prompt, index) => {
+    const id = `${sessionId}:entry:${index + 1}`;
+    const entry: GraphEntry = {
+      type: "message",
+      id,
+      parentId,
+      timestamp: new Date(0).toISOString(),
+      message: { role: "user", text: prompt }
+    };
+    parentId = id;
+    return entry;
+  });
+  return graphStateFromPayload({
+    entries,
+    leafId: entries.at(-1)?.id ?? null
+  });
+}
+
+function graphStateFromPayload(payload: GraphPayload): AgentConversationState {
+  return state({
+    entries: structuredClone(payload.entries),
+    leafId: payload.leafId
+  });
+}
+
+function assertGraphPayload(payload: unknown): GraphPayload {
+  if (!payload || typeof payload !== "object") {
+    assert.fail("Expected graph payload object.");
+  }
+  assert.equal("entries" in payload, true);
+  assert.equal("leafId" in payload, true);
+  const candidate = payload as GraphPayload;
+  assert.equal(Array.isArray(candidate.entries), true);
+  assert.equal(candidate.leafId === null || typeof candidate.leafId === "string", true);
+  return candidate;
 }
 
 function sessionRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {

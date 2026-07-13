@@ -1,5 +1,3 @@
-import { PiAgentRuntimeFactory } from "@agent-platform/agent-core";
-import type { ApplicationRuntime } from "./bootstrap.js";
 import { SessionCommandRunner } from "./session/command-runner.js";
 import type { ExecutionLogger } from "./session/contracts.js";
 import { MySqlCommandRepository } from "./session/mysql/mysql-command-repository.js";
@@ -7,13 +5,13 @@ import { MySqlSessionStore } from "./session/mysql/mysql-session-store.js";
 import { StoredSessionManager } from "./session/mysql/stored-session-manager.js";
 import { BullMqCommandWorker } from "./session/redis/bullmq-command-worker.js";
 import { RedisCommandEventStream } from "./session/redis/redis-command-event-stream.js";
+import { createDefaultAgentRuntimeFactory } from "./runtime/default-agent-runtime-factory.js";
 import { connectCommandDatabase } from "./utils/command-database.js";
 
 export type WorkerOptions = {
   mysqlUrl: string;
   redisUrl: string;
   concurrency?: number;
-  runtime: ApplicationRuntime;
   executionLogger?: ExecutionLogger;
   reportAssembly?: (message: string) => void;
 };
@@ -32,13 +30,8 @@ export async function createWorker(options: WorkerOptions) {
   });
 
   // 创建Agent RuntimeFactory
-  const runtimeFactory = new PiAgentRuntimeFactory({
-    model: options.runtime.model,
-    resolveApiKey: options.runtime.resolveApiKey,
-    onEvent: (event) => commandEvents.accept(event),
-    ...(options.runtime.onApiKeyResolved
-      ? { onApiKeyResolved: options.runtime.onApiKeyResolved }
-      : {})
+  const runtimeFactory = createDefaultAgentRuntimeFactory({
+    onEvent: (event) => commandEvents.accept(event)
   });
 
   // 创建命令仓库

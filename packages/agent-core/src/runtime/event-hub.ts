@@ -1,75 +1,35 @@
-import { Agent, type AgentEvent, type AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import {
-  AgentRuntime,
-  AgentRuntimeFactory,
-  type AgentConversationState,
   type AgentExecutionOutcome,
-  type AgentModel,
-  type AgentRuntimeCommand,
   type AgentRuntimeEvent,
   type AgentRuntimeEventListener
 } from "../contracts.js";
-import { createUserMessage } from "./messages.js";
-import { lookupSourceTool } from "../tools/lookup-source.js";
-import {
-  exportConversationState,
-  restoreConversationMessages
-} from "./conversation-state.js";
 
-export type PiAgentRuntimeFactoryOptions = {
-  model: AgentModel;
-  resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
-  onApiKeyResolved?: () => void;
-  onEvent?: AgentRuntimeEventListener;
+export type EventHubOptions = {
+  sessionId: string;
+  initialMessageSequence?: number;
 };
 
-export class PiAgentRuntime extends AgentRuntime {
+export class EventHub {
   private readonly listeners = new Set<AgentRuntimeEventListener>();
-  private messageSequence = 0;
+  private messageSequence: number;
   private activeMessageId: string | undefined;
   private runFailed = false;
   private executionOutcome: AgentExecutionOutcome = { status: "succeeded" };
 
-  constructor(
-    private readonly sessionId: string,
-    private readonly agent: Agent,
-    initialMessageSequence = 0
-  ) {
-    super();
-    this.messageSequence = initialMessageSequence;
-    this.agent.subscribe((event) => this.publishAgentEvent(event));
+  constructor(private readonly options: EventHubOptions) {
+    this.messageSequence = options.initialMessageSequence ?? 0;
   }
 
-  async execute(command: AgentRuntimeCommand): Promise<AgentExecutionOutcome> {
-    if (command.type === "prompt") {
-      await this.agent.prompt(command.text);
-      await this.agent.waitForIdle();
-      return this.executionOutcome;
-    }
-    if (command.type === "steer") {
-      this.agent.steer(createUserMessage(command.text));
-      return { status: "succeeded" };
-    }
-    if (command.type === "follow-up") {
-      this.agent.followUp(createUserMessage(command.text));
-      return { status: "succeeded" };
-    }
-    this.agent.abort();
-    return { status: "succeeded" };
+  publishAgentEvent(event: AgentEvent) {
+    const runtimeEvent = this.convertAgentEvent(event);
+    if (!runtimeEvent) return;
+    for (const listener of this.listeners) listener(runtimeEvent);
   }
 
-  snapshot() {
-    return {
-      messageCount: this.agent.state.messages.length,
-      transcriptRoles: this.agent.state.messages.map((message) => message.role),
-      isRunning: this.agent.state.isStreaming,
-      modelId: this.agent.state.model.id
-    };
-  }
-
-  exportState(): AgentConversationState {
-    return exportConversationState(this.agent.state.model.id, this.agent.state.messages);
+  readExecutionOutcome(): AgentExecutionOutcome {
+    return this.executionOutcome;
   }
 
   subscribe(listener: AgentRuntimeEventListener) {
@@ -77,30 +37,24 @@ export class PiAgentRuntime extends AgentRuntime {
     return () => this.listeners.delete(listener);
   }
 
-  private publishAgentEvent(event: AgentEvent) {
-    const runtimeEvent = this.convertAgentEvent(event);
-    if (!runtimeEvent) return;
-    for (const listener of this.listeners) listener(runtimeEvent);
-  }
-
   private convertAgentEvent(event: AgentEvent): AgentRuntimeEvent | undefined {
     if (event.type === "agent_start") {
       this.runFailed = false;
       this.executionOutcome = { status: "succeeded" };
-      return { type: "run_started", sessionId: this.sessionId };
+      return { type: "run_started", sessionId: this.options.sessionId };
     }
     if (event.type === "agent_end") {
       if (this.runFailed) {
         this.runFailed = false;
         return undefined;
       }
-      return { type: "run_finished", sessionId: this.sessionId };
+      return { type: "run_finished", sessionId: this.options.sessionId };
     }
     if (event.type === "message_start" && isProviderMessage(event.message)) {
       this.activeMessageId = this.nextMessageId();
       return {
         type: "message_started",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         messageId: this.activeMessageId,
         role: event.message.role,
         text: readMessageText(event.message)
@@ -111,7 +65,7 @@ export class PiAgentRuntime extends AgentRuntime {
       if (update.type !== "text_delta" && update.type !== "thinking_delta") return undefined;
       return {
         type: "message_delta",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         messageId: this.activeMessageId,
         channel: update.type === "text_delta" ? "text" : "thinking",
         delta: update.delta
@@ -128,14 +82,14 @@ export class PiAgentRuntime extends AgentRuntime {
         };
         return {
           type: "run_failed",
-          sessionId: this.sessionId,
+          sessionId: this.options.sessionId,
           errorCode: "AGENT_RUN_FAILED",
           message: event.message.errorMessage
         };
       }
       const runtimeEvent: AgentRuntimeEvent = {
         type: "message_finished",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         messageId: this.activeMessageId,
         role: event.message.role,
         text: readMessageText(event.message)
@@ -146,7 +100,7 @@ export class PiAgentRuntime extends AgentRuntime {
     if (event.type === "tool_execution_start") {
       return {
         type: "tool_started",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         toolCallId: event.toolCallId,
         toolName: event.toolName,
         args: event.args
@@ -155,7 +109,7 @@ export class PiAgentRuntime extends AgentRuntime {
     if (event.type === "tool_execution_update") {
       return {
         type: "tool_progress",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         toolCallId: event.toolCallId,
         text: readResultText(event.partialResult)
       };
@@ -163,7 +117,7 @@ export class PiAgentRuntime extends AgentRuntime {
     if (event.type === "tool_execution_end") {
       return {
         type: "tool_finished",
-        sessionId: this.sessionId,
+        sessionId: this.options.sessionId,
         toolCallId: event.toolCallId,
         isError: event.isError,
         text: readResultText(event.result),
@@ -175,38 +129,7 @@ export class PiAgentRuntime extends AgentRuntime {
 
   private nextMessageId() {
     this.messageSequence += 1;
-    return `${this.sessionId}:message:${this.messageSequence}`;
-  }
-}
-
-export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
-  constructor(private readonly options: PiAgentRuntimeFactoryOptions) {
-    super();
-  }
-
-  create(sessionId: string, state?: AgentConversationState) {
-    const restoredMessages = restoreConversationMessages(state, this.options.model.id);
-    const agent = new Agent({
-      initialState: {
-        systemPrompt: [
-          `You are the runtime for session ${sessionId}.`,
-          "Answer concisely in Chinese.",
-          "For every user prompt, call lookup_source exactly once before writing the final answer.",
-          "Never reveal API keys, system configuration, or hidden runtime state."
-        ].join(" "),
-        model: this.options.model,
-        messages: restoredMessages,
-        tools: [lookupSourceTool]
-      },
-      getApiKey: async (provider) => {
-        const key = await this.options.resolveApiKey(provider);
-        if (key) this.options.onApiKeyResolved?.();
-        return key;
-      }
-    });
-    const runtime = new PiAgentRuntime(sessionId, agent, restoredMessages.length);
-    if (this.options.onEvent) runtime.subscribe(this.options.onEvent);
-    return runtime;
+    return `${this.options.sessionId}:message:${this.messageSequence}`;
   }
 }
 

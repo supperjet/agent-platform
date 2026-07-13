@@ -987,7 +987,7 @@ Worker 先关闭 BullMQ Consumer，让进行中的 Job 完成或停止接收新�
 11. `packages/agent-server/src/session/command-runner.ts`
 12. `packages/agent-server/src/session/mysql/stored-session-manager.ts`
 13. `packages/agent-server/src/session/mysql/mysql-session-store.ts`
-14. `packages/agent-core/src/runtime/pi-agent-runtime.ts`
+14. `packages/agent-core/src/runtime/agent-runtime-factory.ts`
 15. `packages/agent-server/src/session/redis/redis-command-event-stream.ts`
 16. `packages/agent-server/src/session/redis/public-event-envelope.ts`
 17. `packages/agent-server/src/consumer/public-event-stream.ts`

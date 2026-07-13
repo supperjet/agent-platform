@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   fauxAssistantMessage,
   fauxText,
-  fauxToolCall,
   registerFauxProvider
 } from "@earendil-works/pi-ai";
 import { createApplication } from "../bootstrap.js";
@@ -12,13 +11,7 @@ test("isolates sessions and publishes projected event history", async () => {
   const provider = "agent-server-test";
   const registration = registerFauxProvider({ provider });
   registration.setResponses([
-    fauxAssistantMessage(fauxToolCall("lookup_source", { topic: "alpha" }, { id: "alpha-source" }), {
-      stopReason: "toolUse"
-    }),
     fauxAssistantMessage(fauxText("Alpha complete.")),
-    fauxAssistantMessage(fauxToolCall("lookup_source", { topic: "beta" }, { id: "beta-source" }), {
-      stopReason: "toolUse"
-    }),
     fauxAssistantMessage(fauxText("Beta complete."))
   ]);
 
@@ -51,8 +44,8 @@ test("isolates sessions and publishes projected event history", async () => {
     assert.equal(beta.statusCode, 202);
     assert.equal(history.statusCode, 200);
     assert.equal(history.body.includes("server-only-key"), false);
-    assert.equal((await application.sessionManager.snapshot("session-alpha"))?.messageCount, 4);
-    assert.equal((await application.sessionManager.snapshot("session-beta"))?.messageCount, 4);
+    assert.equal((await application.sessionManager.snapshot("session-alpha"))?.messageCount, 2);
+    assert.equal((await application.sessionManager.snapshot("session-beta"))?.messageCount, 2);
   } finally {
     await application.app.close();
     registration.unregister();
