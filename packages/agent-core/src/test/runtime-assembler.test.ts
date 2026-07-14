@@ -19,6 +19,7 @@ import {
   wrapAgentToolDefinition
 } from "../tools/tool-registry.js";
 import { ToolCatalog } from "../tools/tool-catalog.js";
+import { createToolRuntime } from "../tools/tool-runtime.js";
 
 test("assembles static instructions into a prompt plan", () => {
   const registration = registerFauxProvider({ provider: "runtime-assembler-static-test" });
@@ -216,6 +217,47 @@ test("resolves tools through the tool catalog", () => {
     promptGuidelines: ["Use inspect_runtime before answering runtime questions."],
     sourceInfo: { source: "sdk", label: "Test SDK" }
   }]);
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("wraps assembled tools with ToolRuntime lifecycle hooks", async () => {
+  const registration = registerFauxProvider({ provider: "runtime-assembler-tool-runtime-test" });
+  const inspectTool = createInspectTool();
+  const calls: string[] = [];
+  const assembler = new RuntimeAssembler({
+    toolRegistry: createAgentToolRegistry([inspectTool]),
+    services: {
+      toolRuntime: createToolRuntime({
+        beforeToolCall: [({ toolCallId, context }) => {
+          calls.push(`before:${toolCallId}:${context?.sessionId}:${context?.definitionId}`);
+        }],
+        afterToolCall: [({ status }) => {
+          calls.push(`after:${status}`);
+        }]
+      })
+    }
+  });
+
+  try {
+    const assembly = assembler.assemble({
+      sessionId: "session-assembly-tool-runtime",
+      definition: formatAgentDefinition({
+        id: "assembly-tool-runtime-agent",
+        model: registration.getModel(),
+        instructions: ["Inspect before answering."],
+        toolNames: ["inspect_runtime"]
+      }),
+      resolveApiKey: () => "core-only-key"
+    });
+    const result = await assembly.tools[0]?.execute("tool:inspect", { topic: "runtime" });
+
+    assert.equal(readToolResultText(result), "Inspected runtime.");
+    assert.deepEqual(calls, [
+      "before:tool:inspect:session-assembly-tool-runtime:assembly-tool-runtime-agent",
+      "after:succeeded"
+    ]);
   } finally {
     registration.unregister();
   }
@@ -483,6 +525,14 @@ function createInspectTool(): AgentToolDefinition<typeof inspectParameters> {
 
 function readTextContent(message: AgentMessage): string {
   return "content" in message && typeof message.content === "string" ? message.content : "";
+}
+
+function readToolResultText(result: unknown): string {
+  if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return "";
+  return result.content.flatMap((block: unknown) => {
+    if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text") return [];
+    return "text" in block && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n");
 }
 
 function createRuntimeNotesResource(): AgentResourceDefinition {

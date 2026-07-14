@@ -9,9 +9,7 @@ export type AgentInstructionTemplate = {
   render: (variables: AgentPromptVariables) => readonly string[];
 };
 
-export type AgentInstructions =
-  | readonly string[]
-  | AgentInstructionTemplate;
+export type AgentInstructions = readonly string[] | AgentInstructionTemplate;
 
 export type AgentDefinition = {
   id: string; // Agent 长期定义的身份标识
@@ -22,7 +20,9 @@ export type AgentDefinition = {
 };
 
 // 格式化AgentDefinition
-export function formatAgentDefinition(definition: AgentDefinition): AgentDefinition {
+export function formatAgentDefinition(
+  definition: AgentDefinition,
+): AgentDefinition {
   // 验证AgentDefinition的id是否为空
   assertNonBlank("AgentDefinition.id", definition.id);
   assertValidModel(definition.model);
@@ -36,7 +36,7 @@ export function formatAgentDefinition(definition: AgentDefinition): AgentDefinit
     model: definition.model,
     instructions: normalizeAgentInstructions(definition.instructions),
     toolNames: definition.toolNames.map((name) => name.trim()),
-    resourceNames: (definition.resourceNames ?? []).map((name) => name.trim())
+    resourceNames: (definition.resourceNames ?? []).map((name) => name.trim()),
   };
 }
 
@@ -45,9 +45,13 @@ export function resolveAgentInstructions(definition: AgentDefinition): string {
   return resolveAgentInstructionParts(definition).join(" ");
 }
 
-export function resolveAgentInstructionParts(definition: AgentDefinition): readonly string[] {
+export function resolveAgentInstructionParts(
+  definition: AgentDefinition,
+): readonly string[] {
   const instructions = isAgentInstructionTemplate(definition.instructions)
-    ? definition.instructions.render(resolvePromptVariables(definition.instructions))
+    ? definition.instructions.render(
+        resolvePromptVariables(definition.instructions),
+      )
     : definition.instructions;
   return normalizeInstructions(instructions);
 }
@@ -64,19 +68,27 @@ function validateAgentInstructions(instructions: AgentInstructions) {
     assertNonBlank(`AgentDefinition.instructions.variables.${name}`, value);
   }
 
-  normalizeInstructions(instructions.render(resolvePromptVariables(instructions)));
+  normalizeInstructions(
+    instructions.render(resolvePromptVariables(instructions)),
+  );
 }
 
-function normalizeAgentInstructions(instructions: AgentInstructions): AgentInstructions {
+function normalizeAgentInstructions(
+  instructions: AgentInstructions,
+): AgentInstructions {
   if (isAgentInstructionTemplate(instructions)) return instructions;
   return normalizeInstructions(instructions);
 }
 
-function isAgentInstructionTemplate(instructions: AgentInstructions): instructions is AgentInstructionTemplate {
+function isAgentInstructionTemplate(
+  instructions: AgentInstructions,
+): instructions is AgentInstructionTemplate {
   return !Array.isArray(instructions);
 }
 
-function resolvePromptVariables(template: AgentInstructionTemplate): AgentPromptVariables {
+function resolvePromptVariables(
+  template: AgentInstructionTemplate,
+): AgentPromptVariables {
   const definitions = template.variables ?? {};
   const resolved: Record<string, string> = {};
 
@@ -88,14 +100,18 @@ function resolvePromptVariables(template: AgentInstructionTemplate): AgentPrompt
   return resolved;
 }
 
-function normalizeInstructions(instructions: readonly string[]): readonly string[] {
+function normalizeInstructions(
+  instructions: readonly string[],
+): readonly string[] {
   const normalized = instructions.map((instruction, index) => {
     assertNonBlank(`AgentDefinition.instructions[${index}]`, instruction);
     return instruction.trim();
   });
 
   if (normalized.length === 0) {
-    throw new Error("AgentDefinition.instructions must contain at least one instruction.");
+    throw new Error(
+      "AgentDefinition.instructions must contain at least one instruction.",
+    );
   }
 
   return normalized;
@@ -107,20 +123,26 @@ function assertUniqueToolNames(toolNames: readonly AgentToolName[]) {
   for (const name of toolNames) {
     assertNonBlank("AgentDefinition.toolNames[]", name);
     if (names.has(name)) {
-      throw new Error(`AgentDefinition.toolNames contains duplicate tool name: ${name}`);
+      throw new Error(
+        `AgentDefinition.toolNames contains duplicate tool name: ${name}`,
+      );
     }
     names.add(name);
   }
 }
 
-function assertUniqueResourceNames(resourceNames: readonly AgentResourceName[]) {
+function assertUniqueResourceNames(
+  resourceNames: readonly AgentResourceName[],
+) {
   const names = new Set<string>();
 
   for (const name of resourceNames) {
     assertNonBlank("AgentDefinition.resourceNames[]", name);
     const normalizedName = name.trim();
     if (names.has(normalizedName)) {
-      throw new Error(`AgentDefinition.resourceNames contains duplicate resource name: ${normalizedName}`);
+      throw new Error(
+        `AgentDefinition.resourceNames contains duplicate resource name: ${normalizedName}`,
+      );
     }
     names.add(normalizedName);
   }

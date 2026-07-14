@@ -3,7 +3,7 @@ import {
   type AgentConversationState,
   type AgentExecutionOutcome,
   type AgentRuntimeCommand,
-  type AgentRuntimeEventListener
+  type AgentRuntimeEventListener,
 } from "../contracts.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
 import type { AgentLoop } from "./agent-loop.js";
@@ -20,7 +20,7 @@ export class AgentRuntimeSession extends AgentRuntime {
     private readonly sessionId: string,
     private readonly loop: AgentLoop,
     conversation: ConversationRuntimeState,
-    initialMessageSequence = 0
+    initialMessageSequence = 0,
   ) {
     super();
     // 创建事件中心
@@ -31,7 +31,8 @@ export class AgentRuntimeSession extends AgentRuntime {
     this.turnRunner = new TurnRunner({
       loop: this.loop,
       readExecutionOutcome: () => this.eventHub.readExecutionOutcome(),
-      afterTurn: () => this.stateExporter.syncFromSnapshot(this.loop.snapshot())
+      afterTurn: () =>
+        this.stateExporter.syncFromSnapshot(this.loop.snapshot()),
     });
 
     // 订阅事件
@@ -48,7 +49,7 @@ export class AgentRuntimeSession extends AgentRuntime {
       messageCount: snapshot.messages.length,
       transcriptRoles: snapshot.messages.map((message) => message.role),
       isRunning: snapshot.isStreaming,
-      modelId: snapshot.modelId
+      modelId: snapshot.modelId,
     };
   }
 

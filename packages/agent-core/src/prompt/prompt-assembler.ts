@@ -38,18 +38,24 @@ export class PromptAssembler {
     addSection(sections, "instructions", input.definition.instructionText);
     addSection(sections, "availableTools", formatAvailableTools(toolSnippets));
     addSection(sections, "guidelines", formatGuidelines(toolGuidelines));
-    addSection(sections, "resources", input.resources.promptFragments.join("\n\n"));
+    addSection(
+      sections,
+      "resources",
+      input.resources.promptFragments.join("\n\n"),
+    );
 
     return {
       sections,
       toolSnippets,
       toolGuidelines,
-      systemPrompt: sections.map((section) => section.content).join("\n\n")
+      systemPrompt: sections.map((section) => section.content).join("\n\n"),
     };
   }
 }
 
-function collectToolSnippets(toolPlan: ToolCatalogResolution): Readonly<Record<string, string>> {
+function collectToolSnippets(
+  toolPlan: ToolCatalogResolution,
+): Readonly<Record<string, string>> {
   const snippets: Record<string, string> = {};
   for (const entry of toolPlan.entries) {
     if (!entry.promptSnippet) continue;
@@ -58,7 +64,9 @@ function collectToolSnippets(toolPlan: ToolCatalogResolution): Readonly<Record<s
   return snippets;
 }
 
-function collectToolGuidelines(toolPlan: ToolCatalogResolution): readonly string[] {
+function collectToolGuidelines(
+  toolPlan: ToolCatalogResolution,
+): readonly string[] {
   const guidelines = new Set<string>();
   for (const entry of toolPlan.entries) {
     for (const guideline of entry.promptGuidelines) {
@@ -68,12 +76,14 @@ function collectToolGuidelines(toolPlan: ToolCatalogResolution): readonly string
   return [...guidelines];
 }
 
-function formatAvailableTools(toolSnippets: Readonly<Record<string, string>>): string {
+function formatAvailableTools(
+  toolSnippets: Readonly<Record<string, string>>,
+): string {
   const entries = Object.entries(toolSnippets);
   if (entries.length === 0) return "";
   return [
     "Available tools:",
-    ...entries.map(([name, snippet]) => `- ${name}: ${snippet}`)
+    ...entries.map(([name, snippet]) => `- ${name}: ${snippet}`),
   ].join("\n");
 }
 
@@ -81,11 +91,15 @@ function formatGuidelines(guidelines: readonly string[]): string {
   if (guidelines.length === 0) return "";
   return [
     "Guidelines:",
-    ...guidelines.map((guideline) => `- ${guideline}`)
+    ...guidelines.map((guideline) => `- ${guideline}`),
   ].join("\n");
 }
 
-function addSection(sections: PromptSection[], name: PromptSection["name"], content: string) {
+function addSection(
+  sections: PromptSection[],
+  name: PromptSection["name"],
+  content: string,
+) {
   const normalized = content.trim();
   if (!normalized) return;
   sections.push({ name, content: normalized });

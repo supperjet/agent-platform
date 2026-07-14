@@ -1,7 +1,8 @@
-import {
-  type AgentConversationState
-} from "../contracts.js";
-import type { ConversationEntry, ConversationEntryId } from "../conversation/conversation-entry.js";
+import { type AgentConversationState } from "../contracts.js";
+import type {
+  ConversationEntry,
+  ConversationEntryId,
+} from "../conversation/conversation-entry.js";
 import { buildActiveEntries } from "../conversation/conversation-projector.js";
 import { exportConversationEntriesState } from "../conversation/conversation-state.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
@@ -33,7 +34,9 @@ export class StateExporter {
   syncFromSnapshot(snapshot: AgentLoopSnapshot) {
     const activeEntries = buildActiveEntries(this.entries, this.leafId);
     if (snapshot.messages.length < activeEntries.length) {
-      throw new Error("Agent conversation graph cannot sync after message history shrank.");
+      throw new Error(
+        "Agent conversation graph cannot sync after message history shrank.",
+      );
     }
 
     const newMessages = snapshot.messages.slice(activeEntries.length);
@@ -43,7 +46,7 @@ export class StateExporter {
         id: this.nextEntryId(),
         parentId: this.leafId,
         timestamp: new Date().toISOString(),
-        message: structuredClone(message)
+        message: structuredClone(message),
       };
       this.entries.push(entry);
       this.leafId = entry.id;
@@ -52,7 +55,11 @@ export class StateExporter {
 
   exportState(snapshot: AgentLoopSnapshot): AgentConversationState {
     this.syncFromSnapshot(snapshot);
-    return exportConversationEntriesState(snapshot.modelId, this.entries, this.leafId);
+    return exportConversationEntriesState(
+      snapshot.modelId,
+      this.entries,
+      this.leafId,
+    );
   }
 
   private nextEntryId() {

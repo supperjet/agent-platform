@@ -1,7 +1,7 @@
 import {
   AgentRuntimeFactory,
   type AgentConversationState,
-  type AgentRuntimeEventListener
+  type AgentRuntimeEventListener,
 } from "../contracts.js";
 import type { AgentDefinition } from "../definition/agent-definition.js";
 import type { AgentResourceRegistry } from "../resources/resource-catalog.js";
@@ -14,7 +14,9 @@ export type PiAgentRuntimeFactoryOptions = {
   definition: AgentDefinition;
   resourceRegistry?: AgentResourceRegistry;
   toolRegistry?: AgentToolRegistry;
-  resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
+  resolveApiKey: (
+    provider: string,
+  ) => string | undefined | Promise<string | undefined>;
   onApiKeyResolved?: () => void;
   onEvent?: AgentRuntimeEventListener;
 };
@@ -25,18 +27,23 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
   }
 
   create(sessionId: string, state?: AgentConversationState) {
-
     // 组装运行时
     const assembler = new RuntimeAssembler({
-      ...(this.options.resourceRegistry ? { resourceRegistry: this.options.resourceRegistry } : {}),
-      ...(this.options.toolRegistry ? { toolRegistry: this.options.toolRegistry } : {})
+      ...(this.options.resourceRegistry
+        ? { resourceRegistry: this.options.resourceRegistry }
+        : {}),
+      ...(this.options.toolRegistry
+        ? { toolRegistry: this.options.toolRegistry }
+        : {}),
     });
     const assembly = assembler.assemble({
       sessionId,
       definition: this.options.definition,
       ...(state ? { state } : {}),
       resolveApiKey: this.options.resolveApiKey,
-      ...(this.options.onApiKeyResolved ? { onApiKeyResolved: this.options.onApiKeyResolved } : {})
+      ...(this.options.onApiKeyResolved
+        ? { onApiKeyResolved: this.options.onApiKeyResolved }
+        : {}),
     });
 
     // 创建Agent循环适配器
@@ -45,11 +52,16 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
       model: assembly.model,
       messages: assembly.messages,
       tools: assembly.tools,
-      getApiKey: assembly.getApiKey
+      getApiKey: assembly.getApiKey,
     });
 
     // 创建Agent运行时会话
-    const runtime = new AgentRuntimeSession(sessionId, loop, assembly.conversation, assembly.messages.length);
+    const runtime = new AgentRuntimeSession(
+      sessionId,
+      loop,
+      assembly.conversation,
+      assembly.messages.length,
+    );
 
     // 订阅事件
     if (this.options.onEvent) {

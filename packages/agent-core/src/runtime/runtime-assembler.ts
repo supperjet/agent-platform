@@ -1,20 +1,43 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AgentConversationState, AgentModel } from "../contracts.js";
 import type { AgentDefinition } from "../definition/agent-definition.js";
-import { DefinitionResolver, type ResolvedAgentDefinition } from "../definition/definition-resolver.js";
-import { ConversationStore, type ConversationRuntimeState } from "../conversation/conversation-store.js";
-import { createDefaultLifecycleHooks, type LifecycleHooks } from "../lifecycle/lifecycle-hooks.js";
+import {
+  DefinitionResolver,
+  type ResolvedAgentDefinition,
+} from "../definition/definition-resolver.js";
+import {
+  ConversationStore,
+  type ConversationRuntimeState,
+} from "../conversation/conversation-store.js";
+import {
+  createDefaultLifecycleHooks,
+  type LifecycleHooks,
+} from "../lifecycle/lifecycle-hooks.js";
 import { ModelCatalog } from "../model/model-catalog.js";
 import { ModelGateway, type ApiKeyResolver } from "../model/model-gateway.js";
-import { createDefaultRuntimePolicies, type RuntimePolicies } from "../policies/runtime-policies.js";
-import { PromptAssembler, type PromptPlan } from "../prompt/prompt-assembler.js";
+import {
+  createDefaultRuntimePolicies,
+  type RuntimePolicies,
+} from "../policies/runtime-policies.js";
+import {
+  PromptAssembler,
+  type PromptPlan,
+} from "../prompt/prompt-assembler.js";
 import {
   ResourceCatalog,
   type AgentResourceRegistry,
-  type ResourceSnapshot
+  type ResourceSnapshot,
 } from "../resources/resource-catalog.js";
-import { ToolCatalog, type ToolCatalogResolution } from "../tools/tool-catalog.js";
+import {
+  ToolCatalog,
+  type ToolCatalogResolution,
+} from "../tools/tool-catalog.js";
 import type { AgentToolRegistry } from "../tools/tool-registry.js";
+import {
+  createToolRuntime,
+  wrapToolsWithRuntime,
+  type ToolRuntime,
+} from "../tools/tool-runtime.js";
 
 export type RuntimeAssemblyInput = {
   sessionId: string; // 会话ID，用于标识当前会话
@@ -45,6 +68,7 @@ export type RuntimeAssemblerServices = {
   resourceCatalog: ResourceCatalog;
   promptAssembler: PromptAssembler;
   toolCatalog: ToolCatalog;
+  toolRuntime: ToolRuntime;
   conversationStore: ConversationStore;
   modelCatalog: ModelCatalog;
   lifecycleHooks: LifecycleHooks;
@@ -66,11 +90,13 @@ export class RuntimeAssembler {
 
   assemble(input: RuntimeAssemblyInput): RuntimeAssembly {
     // 解析Agent定义
-    const definition = this.services.definitionResolver.resolve(input.definition);
+    const definition = this.services.definitionResolver.resolve(
+      input.definition,
+    );
     // 加载资源
     const resources = this.services.resourceCatalog.load({
       sessionId: input.sessionId,
-      definition
+      definition,
     });
     // 解析工具
     const toolPlan = this.services.toolCatalog.resolveForDefinition(definition);
@@ -78,7 +104,7 @@ export class RuntimeAssembler {
     const promptPlan = this.services.promptAssembler.assemble({
       definition,
       resources,
-      toolPlan
+      toolPlan,
     });
     // 解析模型
     const model = this.services.modelCatalog.resolve(definition);
@@ -86,13 +112,24 @@ export class RuntimeAssembler {
     const conversation = this.services.conversationStore.restore({
       ...(input.state ? { state: input.state } : {}),
       modelId: model.id,
-      definitionId: definition.id
+      definitionId: definition.id,
     });
     // 创建模型网关
     const modelGateway = new ModelGateway({
       resolveApiKey: input.resolveApiKey,
-      ...(input.onApiKeyResolved ? { onApiKeyResolved: input.onApiKeyResolved } : {})
+      ...(input.onApiKeyResolved
+        ? { onApiKeyResolved: input.onApiKeyResolved }
+        : {}),
     });
+
+    const tools = wrapToolsWithRuntime(
+      toolPlan.tools,
+      this.services.toolRuntime,
+      {
+        sessionId: input.sessionId,
+        definitionId: definition.id,
+      },
+    );
 
     return {
       definition,
@@ -103,29 +140,45 @@ export class RuntimeAssembler {
       conversation,
       messages: conversation.messages,
       toolPlan,
-      tools: toolPlan.tools,
+      tools,
       modelGateway,
       getApiKey: (provider) => modelGateway.getApiKey(provider),
       lifecycle: this.services.lifecycleHooks,
-      policies: this.services.policies
+      policies: this.services.policies,
     };
   }
 }
 
-function createRuntimeAssemblerServices(options: RuntimeAssemblerOptions): RuntimeAssemblerServices {
+function createRuntimeAssemblerServices(
+  options: RuntimeAssemblerOptions,
+): RuntimeAssemblerServices {
   const defaultServices: RuntimeAssemblerServices = {
     definitionResolver: new DefinitionResolver(),
     resourceCatalog: new ResourceCatalog(options.resourceRegistry),
     promptAssembler: new PromptAssembler(),
     toolCatalog: new ToolCatalog(options.toolRegistry),
+    toolRuntime: createToolRuntime({
+      beforeToolCall: [
+        // (input) => {
+        //   if (input.tool.name === "read") {
+        //     return {
+        //       allow: false,
+        //       reason: "read tool is not allowed.",
+        //     };
+        //   }
+        //   return undefined;
+        // },
+      ],
+      afterToolCall: [],
+    }),
     conversationStore: new ConversationStore(),
     modelCatalog: new ModelCatalog(),
     lifecycleHooks: createDefaultLifecycleHooks(),
-    policies: createDefaultRuntimePolicies()
+    policies: createDefaultRuntimePolicies(),
   };
 
   return {
     ...defaultServices,
-    ...options.services
+    ...options.services,
   };
 }
