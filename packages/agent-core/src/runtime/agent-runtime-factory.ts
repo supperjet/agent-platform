@@ -10,8 +10,6 @@ import { AgentLoopAdapter } from "./agent-loop-adapter.js";
 import { AgentRuntimeSession } from "./agent-runtime-session.js";
 import { RuntimeAssembler } from "./runtime-assembler.js";
 
-export { AgentRuntimeSession, AgentRuntimeSession as PiAgentRuntime } from "./agent-runtime-session.js";
-
 export type PiAgentRuntimeFactoryOptions = {
   definition: AgentDefinition;
   resourceRegistry?: AgentResourceRegistry;
@@ -27,6 +25,8 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
   }
 
   create(sessionId: string, state?: AgentConversationState) {
+
+    // 组装运行时
     const assembler = new RuntimeAssembler({
       ...(this.options.resourceRegistry ? { resourceRegistry: this.options.resourceRegistry } : {}),
       ...(this.options.toolRegistry ? { toolRegistry: this.options.toolRegistry } : {})
@@ -38,6 +38,8 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
       resolveApiKey: this.options.resolveApiKey,
       ...(this.options.onApiKeyResolved ? { onApiKeyResolved: this.options.onApiKeyResolved } : {})
     });
+
+    // 创建Agent循环适配器
     const loop = new AgentLoopAdapter({
       systemPrompt: assembly.systemPrompt,
       model: assembly.model,
@@ -45,8 +47,11 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
       tools: assembly.tools,
       getApiKey: assembly.getApiKey
     });
+
+    // 创建Agent运行时会话
     const runtime = new AgentRuntimeSession(sessionId, loop, assembly.conversation, assembly.messages.length);
 
+    // 订阅事件
     if (this.options.onEvent) {
       runtime.subscribe(this.options.onEvent);
     }

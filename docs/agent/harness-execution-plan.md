@@ -836,7 +836,343 @@ packages/agent-core/src/prompt/prompt-template.ts
 - 模块职责和测试边界对应。
 - `npm run check` 通过。
 
-## 15. 推荐实施顺序
+## 15. 当前未完成的 Pi coding-agent 对标清单
+
+本节记录截至当前阶段 `agent-core` 还没有完成的能力。判断标准不是“是否有同名模块”，而是是否已经具备 `pi/packages/coding-agent/src/core` 中对应能力的可运行行为、测试边界和后续可扩展入口。
+
+### 15.1 内置 core runtime tools
+
+当前状态：
+
+- `ToolCatalog` 和 `AgentToolRegistry` 已支持静态工具注册、解析、prompt metadata 和 runtime tool 包装。
+- `cli/example-tools.ts` 只有示例工具，不能视为 core runtime 能力。
+- 当前开始建立 `agent-core` 自己的 core tool capability layer：这些工具是 agent 与运行环境交互的基础能力。调用方可以自由组合内置工具定义，coding-agent 只是其中一种高权限组合。
+
+未完成：
+
+- 对标 `coding-agent/src/core/tools/` 的能力边界，沉淀为 `agent-core` 内置 core runtime tools：
+  - `read`
+  - `write`
+  - `edit`
+  - `bash`
+  - `grep`
+  - `find`
+  - `ls`
+- 目录组织要求：
+  - `packages/agent-core/src/tools/` 根目录只放工具注册、装配、定义、catalog、operations、runtime 等 Harness 概念。
+  - `packages/agent-core/src/tools/built-in/` 放内置工具实现。
+  - 每个内置工具一个文件，例如 `built-in/read.ts`、`built-in/edit.ts`。
+  - 从 `coding-agent/src/core/tools` 一个工具一个工具迁移，每迁移一个补对应测试。
+- 补齐工具共用能力：
+  - 路径解析和 workspace 边界校验。
+  - 输出截断和结构化 details。
+  - 文件 mutation queue，避免并发写入/编辑互相覆盖。
+  - edit diff/render utils。
+  - shell/bash executor 抽象，后续可切本地、SSH、容器或 sandbox。
+- 默认工具激活策略需要对齐 coding-agent，但不引入固定 profile：
+  - 调用方手动选择 `built-in` 工具 definitions。
+  - 通过 `createAgentToolRegistry([...])` 注册自由组合。
+  - `AgentDefinition.toolNames` 决定当前 agent 实际请求启用哪些工具。
+  - `ToolCatalog` 负责解析 active tools，并可通过 enablement rules 继续收窄。
+  - 后续继续支持 allowlist、exclude、no-tools、no-builtin-tools 等过滤策略。
+
+验收：
+
+- 每个内置工具有独立单元测试。
+- 工具行为和错误语义优先参考 coding-agent 现有测试。
+- 工具定义只暴露给 LLM 必要 schema，不泄漏执行环境细节。
+
+### 15.2 ToolRuntime 与工具生命周期
+
+当前状态：
+
+- 工具可以被解析并交给底层 Pi Agent 执行。
+- 还没有 `ToolRuntime` 文件和真实执行拦截层。
+
+未完成：
+
+- 实现 `ToolRuntime`：
+  - `beforeToolCall` hook。
+  - `afterToolCall` hook。
+  - block/cancel 工具调用。
+  - 修改工具结果。
+  - 标准化 tool failure。
+- 把工具执行环境从 tool definition 中拆出来：
+  - `ToolOperations` 注入文件系统、shell、远程执行环境。
+  - 工具不直接绑定 Node fs/process。
+- 与 `EventHub` 对齐：
+  - tool started/progress/finished 事件保持稳定 public contract。
+  - tool result details/sourceIds 不泄漏 provider 或底层 Agent 类型。
+
+验收：
+
+- before hook block 时工具不执行。
+- after hook 可以改写 content/details/isError。
+- hook error 会转成标准 run failure 或 tool failure。
+
+### 15.3 LifecycleRunner / extension seam
+
+当前状态：
+
+- `LifecycleHooks` 只是 no-op 占位：`{ name: "default" }`。
+- 还没有 hook 顺序、合并、短路、错误处理。
+
+未完成：
+
+- 实现内部 `LifecycleRunner`，先不公开插件 API。
+- 支持第一批内部 hook：
+  - `onInput`
+  - `beforeRun`
+  - `beforeContext`
+  - `beforeToolCall`
+  - `afterToolCall`
+  - `afterMessage`
+  - `beforeCompaction`
+  - `afterRun`
+- 对齐 coding-agent extension runner 的核心语义：
+  - 可阻止事件。
+  - 可修改事件。
+  - 纯通知事件。
+  - hook 顺序稳定。
+  - hook 失败可诊断。
+
+验收：
+
+- hook 按注册顺序执行。
+- transform 结果会传给下一个 hook。
+- block/cancel 会短路。
+- lifecycle 不依赖 client/server/UI。
+
+### 15.4 InputProcessor / ContextAssembler
+
+当前状态：
+
+- `PromptAssembler` 已能构建静态 system prompt。
+- `TurnRunner` 直接把 command text 转成 user message。
+- 没有 per-turn context assembly。
+
+未完成：
+
+- 实现 `InputProcessor`：
+  - command normalize。
+  - prompt template expansion。
+  - skill command expansion。
+  - input hook 接入。
+- 实现 `ContextAssembler`：
+  - 从 `ConversationProjector` 获取当前消息路径。
+  - 注入当前 command message。
+  - 注入临时 context materials。
+  - 注入 compaction summary / branch summary。
+  - 执行 `beforeContext` hook。
+  - 输出当前 turn 的 systemPrompt/messages/tools/metadata。
+- 支持动态 system prompt：
+  - base `PromptPlan` 不变。
+  - 每轮允许生成临时 override。
+  - turn 结束后恢复 base prompt。
+
+验收：
+
+- per-turn system prompt override 只影响当前 turn。
+- 临时 context 不写回 base prompt。
+- ContextAssembler 不负责加载资源，只消费 ResourceCatalog snapshot。
+
+### 15.5 QueuePolicy / RetryPolicy / CompactionPolicy
+
+当前状态：
+
+- `RuntimePolicies` 只是常量占位：
+  - `queue: "direct"`
+  - `retry: "none"`
+  - `compaction: "disabled"`
+- `TurnRunner` 还不是完整 run coordinator。
+
+未完成：
+
+- 实现 `QueuePolicy`：
+  - steering 优先于 follow-up。
+  - one-at-a-time。
+  - all。
+  - queue_changed event。
+- 实现 `RetryPolicy`：
+  - 可重试错误识别。
+  - 网络/连接丢失重试。
+  - backoff。
+  - abort signal 集成。
+  - retry_scheduled event。
+- 实现 `CompactionPolicy`：
+  - token/context usage 判断。
+  - context overflow recovery。
+  - 手动 compact 入口。
+  - before/after compaction hook。
+  - compaction_started/finished event。
+
+验收：
+
+- `TurnRunner` 主流程只编排策略，不内联大量 if/else。
+- retry 和 compaction 不破坏 conversation state。
+- context overflow 不走普通 retry 分支。
+
+### 15.6 ConversationStore 对齐 SessionManager
+
+当前状态：
+
+- v1 支持 message entry、leafId、旧 messages payload 兼容和 active path projection。
+- `StateExporter` 可以把 loop snapshot 同步成 entry graph。
+
+未完成：
+
+- JSONL append-only 持久化：
+  - session header。
+  - session id。
+  - cwd。
+  - created/modified。
+- branch/fork/tree navigation：
+  - 从历史 entry 分叉。
+  - 切换 leaf。
+  - active path 导出。
+- 非 message entries：
+  - `model_change`
+  - `thinking_level_change`
+  - `compaction`
+  - `branch_summary`
+  - `custom`
+  - `custom_message`
+  - `label`
+  - `session_info`
+- compaction-aware projection：
+  - 最新 compaction summary 进入上下文。
+  - `firstKeptEntryId` 之前的历史被摘要替代。
+- tool call/tool result 顺序合法性校验。
+
+验收：
+
+- 新旧 state 都可恢复。
+- branch path projection 有独立测试。
+- compaction entry 不删除历史，只改变 projection。
+
+### 15.7 ResourceCatalog v2+
+
+当前状态：
+
+- v1 支持静态 resource registry 和 prompt fragments。
+- 不扫描文件系统，不加载 skills/templates/extensions。
+
+未完成：
+
+- 项目上下文文件：
+  - 按 cwd/ancestor/global 发现 `AGENTS.md`、`CLAUDE.md` 等。
+  - 去重。
+  - unreadable file diagnostic。
+  - sourceInfo/path metadata。
+- skills：
+  - skill discovery。
+  - frontmatter/metadata 校验。
+  - collision precedence。
+  - active tools 相关展示策略。
+- prompt templates：
+  - template discovery。
+  - template expansion。
+  - 与 InputProcessor 集成。
+- runtime resource refresh：
+  - `reload()`。
+  - `extendResources()`。
+  - extension resource discovery seam。
+- trust/source scope：
+  - user/global/project/extension/file 来源。
+  - 项目信任后再加载项目级扩展资源。
+
+验收：
+
+- ResourceCatalog 只发现和读取资源。
+- ContextAssembler 决定每轮哪些资源进入上下文。
+- diagnostics 结构化返回，不直接打印或退出进程。
+
+### 15.8 ModelCatalog / ModelGateway
+
+当前状态：
+
+- `ModelCatalog.resolve()` 只是返回 definition.model。
+- `ModelGateway` 只包装 api key resolver。
+- 实际模型调用仍主要委托底层 Pi Agent。
+
+未完成：
+
+- provider registry：
+  - 内置 providers。
+  - custom providers。
+  - dynamic model refresh。
+- auth 解析链：
+  - 显式 apiKey。
+  - OAuth token 和刷新。
+  - 环境变量。
+  - ADC/GCloud/AWS 等 provider-specific auth。
+- stream/complete 标准化：
+  - text/thinking/toolcall events。
+  - provider error 转标准 stop reason。
+  - token usage/cost。
+- model resolver：
+  - scoped model。
+  - fallback 策略。
+  - model capability 检查。
+
+验收：
+
+- TurnRunner 不读环境变量。
+- provider 错误不泄漏 provider 私有结构。
+- model mismatch/fallback 语义明确。
+
+### 15.9 AgentSessionRuntime / cwd-bound services
+
+当前状态：
+
+- `agent-core` 只能创建单个 runtime session。
+- 没有 coding-agent 风格的 session runtime 管理层。
+
+未完成：
+
+- new/resume/fork/import/switch session。
+- cwd 切换时重建 services：
+  - ResourceCatalog。
+  - Tool operations。
+  - settings。
+  - trust。
+  - extensions。
+- session shutdown/start lifecycle。
+- session-level diagnostics。
+
+验收：
+
+- 单个 `AgentRuntimeSession` 仍保持小 facade。
+- session switching 不进入 server/client 专属概念。
+- cwd-bound service rebuild 有清晰工厂边界。
+
+### 15.10 Public surface 与命名收口
+
+当前状态：
+
+- `index.ts` 仍导出较多内部模块。
+- `PiAgentRuntimeFactory` 命名还保留在 public surface。
+
+未完成：
+
+- 收口 public exports：
+  - public runtime contracts。
+  - definition input。
+  - factory。
+  - SDK 需要的 registry builders。
+- 内部模块不从根出口泄漏。
+- 去 Pi 命名：
+  - `PiAgentRuntimeFactory` 改为兼容 alias 或 adapter-specific export。
+  - 对外主命名统一为 `AgentCoreRuntimeFactory`。
+- 更新架构文档和实际命名不一致的地方。
+
+验收：
+
+- public API 小而稳定。
+- adapter-specific 命名不污染核心概念。
+- `npm run check` 通过。
+
+## 16. 推荐实施顺序
 
 优先顺序：
 
@@ -866,7 +1202,7 @@ packages/agent-core/src/prompt/prompt-template.ts
 - 动态 systemPrompt 必须等 TurnRunner/LifecycleRunner 有明确 per-turn 生命周期后再做，否则容易污染静态 PromptPlan。
 - 最后再引入 ToolRuntime、policies 和 ResourceCatalog v2+，避免一开始把资源系统做成过宽的插件平台。
 
-## 16. 每阶段通用验收
+## 17. 每阶段通用验收
 
 每个阶段都要满足：
 
@@ -878,7 +1214,7 @@ packages/agent-core/src/prompt/prompt-template.ts
 - 若改动跨模块，跑相关 `npm test`。
 - 新文件必须落在目标职责目录；不得为了方便继续扩大 `agent-runtime-factory.ts`。
 
-## 17. 风险控制
+## 18. 风险控制
 
 主要风险：
 

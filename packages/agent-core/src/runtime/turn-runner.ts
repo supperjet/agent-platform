@@ -11,6 +11,11 @@ export type TurnRunnerOptions = {
   afterTurn?: () => void;
 };
 
+/**
+ * 回合运行器
+ * 负责执行Agent运行时命令，并返回执行结果
+ */
+
 export class TurnRunner {
   constructor(private readonly options: TurnRunnerOptions) {}
 

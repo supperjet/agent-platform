@@ -11,6 +11,11 @@ export type EventHubOptions = {
   initialMessageSequence?: number;
 };
 
+/**
+ * 事件中心
+ * 负责将Agent事件转换为运行时事件，并发布给监听器
+ */
+
 export class EventHub {
   private readonly listeners = new Set<AgentRuntimeEventListener>();
   private messageSequence: number;

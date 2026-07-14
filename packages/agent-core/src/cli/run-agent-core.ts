@@ -3,14 +3,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
-import { fauxAssistantMessage, fauxText, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, getModels, registerFauxProvider } from "@earendil-works/pi-ai";
 import {
-  DEFAULT_DEEPSEEK_MODEL_ID,
   createAgentResourceRegistry,
   createAgentToolRegistry,
+  createBuiltInToolDefinitions,
   formatAgentDefinition,
-  getDeepSeekModel,
   PiAgentRuntimeFactory,
+  createLocalToolOperations,
+  type AgentModel,
   type AgentRuntimeEvent
 } from "../index.js";
 import { ResourceCatalog } from "../resources/resource-catalog.js";
@@ -68,7 +69,12 @@ async function main() {
     const resourceRegistry = options.exampleResources
       ? createAgentResourceRegistry(exampleCliResources)
       : undefined;
-    const toolRegistry = options.exampleTools ? createAgentToolRegistry(exampleCliTools) : undefined;
+    const toolOperations = createLocalToolOperations({ cwd: process.cwd() });
+    const toolRegistry = createAgentToolRegistry([
+      ...createBuiltInToolDefinitions(toolOperations),
+      ...exampleCliTools
+    ]);
+
     const resolveApiKey = (provider: string) => {
       if (registration && provider === model.provider) return "faux-key";
       if (provider !== "deepseek") return undefined;
@@ -130,7 +136,7 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     fauxResponse: "Faux runtime response.",
     exampleResources: false,
     exampleTools: false,
-    modelId: process.env.DEEPSEEK_MODEL_ID ?? DEFAULT_DEEPSEEK_MODEL_ID,
+    modelId: process.env.DEEPSEEK_MODEL_ID ?? "deepseek-v4-flash",
     printResources: false,
     printState: false,
     printTools: false,
@@ -314,9 +320,9 @@ Options:
   --faux-response <text>    Response text for --faux mode.
   --example-resources       Register CLI-only example resources for prompt assembly testing.
   --example-tools           Register CLI-only example tools for prompt assembly testing.
-  --model <id>              DeepSeek model id. Defaults to DEEPSEEK_MODEL_ID from .env or ${DEFAULT_DEEPSEEK_MODEL_ID}.
+  --model <id>              DeepSeek model id. Defaults to DEEPSEEK_MODEL_ID from .env or.
   --resources <a,b>         Enable host-registered resources by name.
-  --tools <a,b>             Enable host-registered tools by name.
+  --tools <a,b>             Enable registered tools by name. Built-ins are registered by default: read,ls,grep,find,write,edit,bash.
   --print-resources         Print registered or selected resource metadata and exit without running the model.
   --print-tools             Print registered or selected tool metadata and exit without running the model.
   --print-system-prompt     Print the assembled system prompt and exit without running the model.
@@ -377,6 +383,15 @@ function stripDotEnvQuotes(value: string) {
     return value.slice(1, -1);
   }
   return value;
+}
+
+function getDeepSeekModel(modelId: string): AgentModel {
+  const models = getModels("deepseek");
+  const model = models.find((candidate) => candidate.id === modelId);
+  if (!model) {
+    throw new Error(`Unknown DeepSeek model "${modelId}". Available: ${models.map((item) => item.id).join(", ")}`);
+  }
+  return model;
 }
 
 main().catch((error: unknown) => {

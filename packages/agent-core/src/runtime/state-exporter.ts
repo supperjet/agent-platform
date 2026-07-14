@@ -12,6 +12,11 @@ export type StateExporterOptions = {
   conversation: ConversationRuntimeState;
 };
 
+/**
+ * 状态导出器
+ * 把 loop snapshot 同步成 conversation entry graph
+ */
+
 export class StateExporter {
   private readonly sessionId: string;
   private entries: ConversationEntry[];

@@ -23,14 +23,19 @@ export class AgentRuntimeSession extends AgentRuntime {
     initialMessageSequence = 0
   ) {
     super();
+    // 创建事件中心
     this.eventHub = new EventHub({ sessionId, initialMessageSequence });
+    // 创建状态导出器
     this.stateExporter = new StateExporter({ sessionId, conversation });
-    this.loop.subscribe((event) => this.eventHub.publishAgentEvent(event));
+    // 创建回合运行器
     this.turnRunner = new TurnRunner({
       loop: this.loop,
       readExecutionOutcome: () => this.eventHub.readExecutionOutcome(),
       afterTurn: () => this.stateExporter.syncFromSnapshot(this.loop.snapshot())
     });
+
+    // 订阅事件
+    this.loop.subscribe((event) => this.eventHub.publishAgentEvent(event));
   }
 
   async execute(command: AgentRuntimeCommand): Promise<AgentExecutionOutcome> {
