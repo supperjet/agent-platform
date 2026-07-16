@@ -541,9 +541,17 @@ v6：持久化和 import/export
 - 支持 session header、session id、cwd、created/modified。
 - 支持从外部 state 导入、导出单条 active path。
 
-## 9. 阶段 5：ToolCatalog / ToolRuntime
+## 9. 阶段 5：Core Tool Capability Layer
 
-目标：让 tool 声明、解析、执行策略从 runtime 装配中独立出来。
+目标：把 tool 从“注册一组可调用函数”提升为 agent-core 的默认核心能力层。
+
+这一层对标 `pi/packages/coding-agent/src/core/tools`，但不直接复制 coding-agent 的 UI、extension 和 session 绑定逻辑。agent-core 的 tool 层要保持 provider/runtime 中立：
+
+- tool 定义、注册、解析、执行包装分离。
+- 内置工具作为 agent 的默认核心能力，而不只服务 coding agent。
+- 文件系统、shell、远程环境通过 `ToolOperations` 注入，而不是写死在工具函数里。
+- 工具执行经过 `ToolRuntime`，统一承载 policy、approval、lifecycle events、progress update 和错误归一化。
+- ToolRuntime 内部事件通过 runtime bridge 进入 `EventHub` / 公共事件流，方便后续 server/client 做全生命周期监听。
 
 新增文件建议：
 
@@ -552,42 +560,130 @@ packages/agent-core/src/tools/tool-definition.ts
 packages/agent-core/src/tools/tool-catalog.ts
 packages/agent-core/src/tools/tool-runtime.ts
 packages/agent-core/src/tools/tool-adapter.ts
+packages/agent-core/src/tools/built-in/
+packages/agent-core/src/tools/operations/
+packages/agent-core/src/tools/policy/
 ```
 
 工作项：
 
-- 保留当前 `AgentToolRegistry`，先迁移成 `ToolCatalog` 的内部实现。
+- 保留 `AgentToolRegistry`，作为 tool definition 的注册容器。
 - `ToolCatalog.resolve(toolRefs)` 输出：
   - active `AgentTool[]`
   - prompt snippets
   - prompt guidelines
-- `ToolRuntime` 包装 tool execute：
-  - 调用 `lifecycle.beforeToolCall`
-  - 执行 tool
-  - 调用 `lifecycle.afterToolCall`
-- 第一版 lifecycle 可以是 no-op runner。
+- 建立默认内置工具集合：
+  - `read`
+  - `ls`
+  - `grep`
+  - `find`
+  - `write`
+  - `edit`
+  - `bash`
+- 建立 `ToolOperations`：
+  - 隔离 fs/shell 等真实执行环境。
+  - 第一版提供 local implementation。
+  - 未来可以替换成 sandbox、remote workspace、container、browser fs 等实现。
+- 建立 `ToolRuntime`：
+  - 包装原始 tool `execute`。
+  - 执行前做 policy 判断。
+  - 需要时发起 approval。
+  - 包装 `onUpdate` 并发出 progress event。
+  - 执行后归一化 succeeded / failed / aborted / blocked 状态。
+  - 发出 started / updated / finished / policy / approval lifecycle events。
+- 建立 `ToolPolicy`：
+  - 第一版只做足够实用的默认规则。
+  - 默认 `write` / `edit` / `bash` 需要 approval。
+  - 阻止敏感路径和高风险 shell 命令。
+  - 保留 allow / block / requireApproval / rewrite 四类 decision。
+- 把 ToolRuntime events 桥接到公共 runtime events：
+  - `tool_started`
+  - `tool_progress`
+  - `tool_finished`
+  - `tool_policy_checked`
+  - `tool_approval_requested`
+  - `tool_approval_approved`
+  - `tool_approval_denied`
+- CLI 提供两类验证入口：
+  - 单工具执行：`--call-tool`
+  - 完整 agent 执行：`--agent-playground`
 
 测试：
 
 - duplicate tool name 失败。
 - unknown tool ref 失败。
-- beforeToolCall block 时 tool 不执行。
-- afterToolCall 可以改写 result。
+- ToolRuntime before/after hooks 可执行。
+- ToolRuntime 能发出 started / updated / finished 事件。
+- ToolPolicy block 时 tool 不执行。
+- ToolPolicy rewrite 能改写参数。
+- approval approve 后继续执行。
+- approval deny 后返回 blocked。
+- EventHub 能把 ToolRuntime lifecycle event 转成公共 runtime event。
+- CLI 能独立执行内置工具，并能在完整 agent playground 中走同一套 runtime path。
 
 验收：
 
-- tool name 解析不在 RuntimeAssembler 里展开细节。
-- tool lifecycle 调用点在 ToolRuntime 内部显式存在。
+- 已完成：tool name 解析不在 RuntimeAssembler 里展开细节。
+- 已完成：tool definition registry 和 runtime active tools 分离。
+- 已完成：内置工具默认注册，可通过 profile/policy/definition 控制启用范围。
+- 已完成：内置工具不直接绑定本地 fs/shell，而是依赖 `ToolOperations`。
+- 已完成：ToolRuntime 是工具执行的统一入口。
+- 已完成：ToolPolicy 与 beforeHook 分层清楚：
+  - ToolPolicy 表达安全、权限、审批、参数改写等语义规则。
+  - beforeHook 是低层生命周期扩展点。
+- 已完成：ToolRuntime 内部事件进入公共事件桥。
+- 已完成：CLI 可以验证单个工具和完整 agent 执行路径。
+- 已完成：`npm run typecheck --workspace @agent-platform/agent-core` 通过。
+- 已完成：`npm run test --workspace @agent-platform/agent-core` 通过。
 
 当前进展：
 
-- `ToolCatalog` 已先完成静态装配层职责：
+- `ToolCatalog` 已完成静态装配层职责：
   - 从 definition 的 tool names 解析 active tools。
   - 输出 runtime 可执行 `tools`。
   - 输出 debug/UI/API-safe 的 `toolInfos`。
   - 收集 `promptSnippet`、`promptGuidelines`、`sourceInfo`。
   - `PromptAssembler` 已消费 tool prompt metadata。
-- `ToolRuntime` 还未开始。下一次进入执行层前，再补 before/after tool call hook 和 result 改写能力。
+- `ToolOperations` 已完成第一版：
+  - `type.ts` 定义环境操作接口。
+  - `local-tool-operations.ts` 提供 root-bound 本地实现。
+  - 内置工具通过 operations 访问文件和 shell。
+- `built-in` 已完成第一版：
+  - 一个工具一个文件。
+  - 默认覆盖 read / ls / grep / find / write / edit / bash。
+  - 每个工具有中文注释，便于后续逐个对标 coding-agent 行为。
+- `ToolRuntime` 已完成第一版：
+  - before/after hooks。
+  - onUpdate 包装。
+  - lifecycle events。
+  - policy / approval。
+  - 结果状态归一化。
+- `ToolPolicy` 已完成第一版：
+  - 默认策略已足够支撑当前 CLI 和 playground 验证。
+  - 暂不继续细化 DSL，避免提前设计过重。
+- `EventHub` 已接入 ToolRuntime event bridge：
+  - 使用 `preferToolRuntimeEvents` 避免和底层 pi-agent-core tool events 重复。
+  - 公共事件契约已包含 policy/approval 事件。
+- `run-agent-core.ts` 和 `agent-playground.ts` 已提供验证入口：
+  - 直接调工具时可测试 policy、approval、tool cwd、tool args。
+  - playground 中可测试完整 agent run、tool execution、runtime events 和 request timeout。
+
+本阶段结论：
+
+- tools 阶段已经形成 agent-core 的 core capability layer。
+- 当前能力足以支撑后续 lifecycle、server/client approval UI、observability、sandbox/remote operations 的建设。
+- 下一阶段不再继续扩大 tools 基础面，除非发现 coding-agent 对标中的明确行为缺口。
+
+后续增强项：
+
+- `renderCall` / `renderResult`：用于 UI、日志、导出中的工具调用展示，不影响工具执行主链路。
+- 更细的 policy DSL：按 profile、workspace、风险等级、命令类别、路径类别组合规则。
+- 更完整的 Tool Observability：
+  - duration、status、policy decision、approval latency、失败类型、工具调用频率。
+  - 用于调试、审计、性能分析和后续 server/client 可视化。
+- sandbox / remote / container 版 `ToolOperations`。
+- server/client 侧 approval 交互闭环。
+- 工具结果结构化和 artifact 化。
 
 ## 10. 阶段 6：LifecycleRunner 内部化
 
@@ -845,12 +941,8 @@ packages/agent-core/src/prompt/prompt-template.ts
 当前状态：
 
 - `ToolCatalog` 和 `AgentToolRegistry` 已支持静态工具注册、解析、prompt metadata 和 runtime tool 包装。
-- `cli/example-tools.ts` 只有示例工具，不能视为 core runtime 能力。
-- 当前开始建立 `agent-core` 自己的 core tool capability layer：这些工具是 agent 与运行环境交互的基础能力。调用方可以自由组合内置工具定义，coding-agent 只是其中一种高权限组合。
-
-未完成：
-
-- 对标 `coding-agent/src/core/tools/` 的能力边界，沉淀为 `agent-core` 内置 core runtime tools：
+- 已建立 `agent-core` 自己的 core tool capability layer：这些工具是 agent 与运行环境交互的基础能力。调用方可以自由组合内置工具定义，coding-agent 只是其中一种高权限组合。
+- 已对标 `coding-agent/src/core/tools/` 的核心能力边界，沉淀为 `agent-core` 内置 core runtime tools：
   - `read`
   - `write`
   - `edit`
@@ -858,57 +950,71 @@ packages/agent-core/src/prompt/prompt-template.ts
   - `grep`
   - `find`
   - `ls`
-- 目录组织要求：
+- 目录组织已经按以下边界落地：
   - `packages/agent-core/src/tools/` 根目录只放工具注册、装配、定义、catalog、operations、runtime 等 Harness 概念。
   - `packages/agent-core/src/tools/built-in/` 放内置工具实现。
   - 每个内置工具一个文件，例如 `built-in/read.ts`、`built-in/edit.ts`。
-  - 从 `coding-agent/src/core/tools` 一个工具一个工具迁移，每迁移一个补对应测试。
-- 补齐工具共用能力：
-  - 路径解析和 workspace 边界校验。
-  - 输出截断和结构化 details。
-  - 文件 mutation queue，避免并发写入/编辑互相覆盖。
-  - edit diff/render utils。
-  - shell/bash executor 抽象，后续可切本地、SSH、容器或 sandbox。
-- 默认工具激活策略需要对齐 coding-agent，但不引入固定 profile：
+- 默认工具激活策略已对齐“自由组合优先”的方向，不引入固定 profile：
   - 调用方手动选择 `built-in` 工具 definitions。
   - 通过 `createAgentToolRegistry([...])` 注册自由组合。
   - `AgentDefinition.toolNames` 决定当前 agent 实际请求启用哪些工具。
   - `ToolCatalog` 负责解析 active tools，并可通过 enablement rules 继续收窄。
-  - 后续继续支持 allowlist、exclude、no-tools、no-builtin-tools 等过滤策略。
+- 已补齐第一版工具共用能力：
+  - root-bound 路径解析和 workspace 边界约束。
+  - 输出截断。
+  - 本地 fs/shell operations 抽象。
+  - edit/write/bash 的 policy/approval 入口。
+  - CLI 单工具执行验证入口。
+
+剩余增强项：
+
+- 更细的输出结构化 details。
+- 文件 mutation queue，避免并发写入/编辑互相覆盖。
+- 更完整的 edit diff/render utils。
+- 更丰富的 bash executor 抽象，后续可切本地、SSH、容器或 sandbox。
+- 后续继续支持 allowlist、exclude、no-tools、no-builtin-tools 等过滤策略。
 
 验收：
 
-- 每个内置工具有独立单元测试。
-- 工具行为和错误语义优先参考 coding-agent 现有测试。
-- 工具定义只暴露给 LLM 必要 schema，不泄漏执行环境细节。
+- 已完成：每个内置工具可以通过 CLI 独立执行验证。
+- 已完成：核心 ToolRuntime / ToolPolicy / EventHub bridge 有单元测试覆盖。
+- 待增强：每个内置工具补更细粒度的独立单元测试。
+- 持续要求：工具行为和错误语义优先参考 coding-agent 现有测试。
+- 持续要求：工具定义只暴露给 LLM 必要 schema，不泄漏执行环境细节。
 
 ### 15.2 ToolRuntime 与工具生命周期
 
 当前状态：
 
 - 工具可以被解析并交给底层 Pi Agent 执行。
-- 还没有 `ToolRuntime` 文件和真实执行拦截层。
-
-未完成：
-
-- 实现 `ToolRuntime`：
+- 已实现 `ToolRuntime` 作为真实执行拦截层：
   - `beforeToolCall` hook。
   - `afterToolCall` hook。
   - block/cancel 工具调用。
-  - 修改工具结果。
+  - policy block / approval。
+  - rewrite 工具参数。
   - 标准化 tool failure。
-- 把工具执行环境从 tool definition 中拆出来：
+- 已把工具执行环境从 tool definition 中拆出来：
   - `ToolOperations` 注入文件系统、shell、远程执行环境。
   - 工具不直接绑定 Node fs/process。
-- 与 `EventHub` 对齐：
+- 已与 `EventHub` 对齐：
   - tool started/progress/finished 事件保持稳定 public contract。
+  - policy/approval 事件进入 public contract。
   - tool result details/sourceIds 不泄漏 provider 或底层 Agent 类型。
+
+剩余增强项：
+
+- after hook 对 result 的改写能力可以继续细化类型约束。
+- hook error 的 failure 归因可以继续增强，区分 policy failure、tool failure、lifecycle failure。
+- 公共事件可以继续补充 duration、decision、approval latency 等 observability 字段。
 
 验收：
 
-- before hook block 时工具不执行。
-- after hook 可以改写 content/details/isError。
-- hook error 会转成标准 run failure 或 tool failure。
+- 已完成：policy/before hook block 时工具不执行。
+- 已完成：approval approve 后继续执行，approval deny 后 blocked。
+- 已完成：ToolRuntime lifecycle event 能桥接到 public runtime event。
+- 待增强：after hook 改写 content/details/isError 的类型和测试继续补细。
+- 待增强：hook error 会转成标准 run failure 或 tool failure，并带更明确诊断。
 
 ### 15.3 LifecycleRunner / extension seam
 

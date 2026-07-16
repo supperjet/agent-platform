@@ -8,6 +8,8 @@ import {
   createAgentResourceRegistry,
   createAgentToolRegistry,
   createBuiltInToolDefinitions,
+  createDefaultToolPolicy,
+  createToolRuntime,
   formatAgentDefinition,
   PiAgentRuntimeFactory,
   createLocalToolOperations,
@@ -17,6 +19,7 @@ import {
 import { ResourceCatalog } from "../resources/resource-catalog.js";
 import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
 import { ToolCatalog } from "../tools/tool-catalog.js";
+import { startAgentPlayground } from "./agent-playground.js";
 import { exampleCliResources } from "./example-resources.js";
 import { exampleCliTools } from "./example-tools.js";
 
@@ -27,11 +30,18 @@ type CliOptions = {
   exampleResources: boolean;
   exampleTools: boolean;
   modelId: string;
+  agentPlayground: boolean;
+  callTool?: string;
+  approveToolCall: boolean;
+  noToolPolicy: boolean;
   printResources: boolean;
   printState: boolean;
   printTools: boolean;
   printSystemPrompt: boolean;
+  requestTimeoutMs: number | undefined;
   resourceNames: string[];
+  toolArgs: unknown;
+  toolCwd: string;
   toolNames: string[];
   prompt: string;
 };
@@ -39,7 +49,7 @@ type CliOptions = {
 async function main() {
   loadDotEnv();
   const options = await parseArgs(process.argv.slice(2));
-  if (!options.prompt.trim() && !options.printSystemPrompt && !options.printTools && !options.printResources) {
+  if (!options.prompt.trim() && !options.agentPlayground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources) {
     printUsage();
     process.exitCode = 1;
     return;
@@ -54,6 +64,41 @@ async function main() {
   }
 
   try {
+    const resourceRegistry = options.exampleResources
+      ? createAgentResourceRegistry(exampleCliResources)
+      : undefined;
+    const toolOperations = createLocalToolOperations({ cwd: options.toolCwd });
+    const toolRegistry = createAgentToolRegistry([
+      ...createBuiltInToolDefinitions(toolOperations),
+      ...(options.exampleTools ? exampleCliTools : [])
+    ]);
+
+    if (options.agentPlayground) {
+      const model = registration ? registration.getModel() : getDeepSeekModel(options.modelId);
+      const resolveApiKey = (provider: string) => {
+        if (registration && provider === model.provider) return "faux-key";
+        if (provider !== "deepseek") return undefined;
+        return process.env.DEEPSEEK_API_KEY;
+      };
+      await startAgentPlayground({
+        model,
+        resolveApiKey,
+        exampleResources: options.exampleResources ? exampleCliResources : [],
+        exampleTools: options.exampleTools ? exampleCliTools : [],
+        initialCwd: options.toolCwd,
+        ...(options.toolNames.length > 0 ? { initialToolNames: options.toolNames } : {}),
+        ...(options.resourceNames.length > 0 ? { initialResourceNames: options.resourceNames } : {}),
+        ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+        json: options.json
+      });
+      return;
+    }
+
+    if (options.callTool) {
+      await callToolDirectly(toolRegistry, options);
+      return;
+    }
+
     const model = registration ? registration.getModel() : getDeepSeekModel(options.modelId);
     const definition = formatAgentDefinition({
       id: "agent-core-cli",
@@ -66,14 +111,6 @@ async function main() {
       toolNames: options.toolNames,
       resourceNames: options.resourceNames
     });
-    const resourceRegistry = options.exampleResources
-      ? createAgentResourceRegistry(exampleCliResources)
-      : undefined;
-    const toolOperations = createLocalToolOperations({ cwd: process.cwd() });
-    const toolRegistry = createAgentToolRegistry([
-      ...createBuiltInToolDefinitions(toolOperations),
-      ...exampleCliTools
-    ]);
 
     const resolveApiKey = (provider: string) => {
       if (registration && provider === model.provider) return "faux-key";
@@ -110,6 +147,7 @@ async function main() {
       definition,
       ...(resourceRegistry ? { resourceRegistry } : {}),
       ...(toolRegistry ? { toolRegistry } : {}),
+      ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
       resolveApiKey
     }).create("agent-core-cli");
 
@@ -137,11 +175,17 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     exampleResources: false,
     exampleTools: false,
     modelId: process.env.DEEPSEEK_MODEL_ID ?? "deepseek-v4-flash",
+    agentPlayground: false,
+    approveToolCall: false,
+    noToolPolicy: false,
     printResources: false,
     printState: false,
     printTools: false,
     printSystemPrompt: false,
+    requestTimeoutMs: readOptionalPositiveInteger(process.env.AGENT_CORE_REQUEST_TIMEOUT_MS, "AGENT_CORE_REQUEST_TIMEOUT_MS"),
     resourceNames: [],
+    toolArgs: {},
+    toolCwd: resolve(process.env.INIT_CWD ?? process.cwd()),
     toolNames: [],
     prompt: ""
   };
@@ -178,6 +222,34 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
       options.modelId = requireValue(args, ++index, "--model");
       continue;
     }
+    if (arg === "--request-timeout-ms") {
+      options.requestTimeoutMs = parsePositiveInteger(requireValue(args, ++index, "--request-timeout-ms"), "--request-timeout-ms");
+      continue;
+    }
+    if (arg === "--agent-playground") {
+      options.agentPlayground = true;
+      continue;
+    }
+    if (arg === "--call-tool") {
+      options.callTool = requireValue(args, ++index, "--call-tool");
+      continue;
+    }
+    if (arg === "--tool-args") {
+      options.toolArgs = parseJsonArg(requireValue(args, ++index, "--tool-args"), "--tool-args");
+      continue;
+    }
+    if (arg === "--tool-cwd") {
+      options.toolCwd = resolve(requireValue(args, ++index, "--tool-cwd"));
+      continue;
+    }
+    if (arg === "--approve-tool-call" || arg === "--yes") {
+      options.approveToolCall = true;
+      continue;
+    }
+    if (arg === "--no-tool-policy") {
+      options.noToolPolicy = true;
+      continue;
+    }
     if (arg === "--tools") {
       const value = requireValue(args, ++index, "--tools");
       options.toolNames = value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -208,10 +280,52 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
   }
 
   options.prompt = promptParts.join(" ").trim();
-  if (!options.prompt && !options.printSystemPrompt && !options.printTools && !options.printResources && !stdin.isTTY) {
+  if (!options.prompt && !options.agentPlayground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources && !stdin.isTTY) {
     options.prompt = await readStdin();
   }
   return options;
+}
+
+async function callToolDirectly(
+  toolRegistry: ReturnType<typeof createAgentToolRegistry>,
+  options: CliOptions,
+) {
+  const entry = toolRegistry.getEntry(options.callTool ?? "");
+  if (!entry) {
+    throw new Error(`Unknown tool "${options.callTool}". Available: ${toolRegistry.getAllEntries().map((item) => item.tool.name).join(", ")}`);
+  }
+
+  const runtime = createToolRuntime({
+    ...(options.noToolPolicy ? {} : { policy: createDefaultToolPolicy() }),
+    ...(options.approveToolCall ? { approvalHandler: () => true } : {}),
+    onEvent: (event) => {
+      if (options.json) {
+        stderr.write(`${JSON.stringify(event)}\n`);
+        return;
+      }
+      stderr.write(`[${event.type}] ${event.toolName}:${event.toolCallId}\n`);
+    }
+  });
+  const result = await runtime.execute({
+    tool: entry.tool,
+    toolCallId: `cli:${entry.tool.name}`,
+    args: options.toolArgs,
+    context: {
+      sessionId: "agent-core-cli",
+      metadata: { cwd: options.toolCwd }
+    }
+  });
+
+  if (options.json) {
+    stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
+  stdout.write(`${readResultText(result.result)}\n`);
+  if (result.status !== "succeeded") {
+    stderr.write(`${result.error?.message ?? `Tool ${result.status}.`}\n`);
+    process.exitCode = 1;
+  }
 }
 
 function printResources(catalog: ResourceCatalog, options: CliOptions) {
@@ -239,6 +353,28 @@ function requireValue(args: string[], index: number, flag: string) {
   const value = args[index];
   if (!value) throw new Error(`${flag} requires a value.`);
   return value;
+}
+
+function parseJsonArg(value: string, flag: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${flag} must be valid JSON: ${message}`);
+  }
+}
+
+function readOptionalPositiveInteger(value: string | undefined, label: string): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  return parsePositiveInteger(value, label);
+}
+
+function parsePositiveInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return parsed;
 }
 
 function printEvent(event: AgentRuntimeEvent, options: CliOptions) {
@@ -293,6 +429,14 @@ function printTools(catalog: ToolCatalog, options: CliOptions) {
   }
 }
 
+function readResultText(result: unknown): string {
+  if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return "";
+  return result.content.flatMap((block: unknown) => {
+    if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text") return [];
+    return "text" in block && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n");
+}
+
 function readStdin() {
   return new Promise<string>((resolve, reject) => {
     let data = "";
@@ -312,15 +456,24 @@ function printUsage() {
   npm run dev:core -- --faux "测试运行链路"
   npm run dev:core -- --example-tools --tools inspect_runtime,read_note --print-system-prompt
   npm run dev:core -- --example-tools --print-tools
+  npm run dev:core -- --agent-playground
+  npm run dev:core -- --call-tool read --tool-args '{"path":"package.json"}'
   npm run dev:core -- --example-resources --print-resources
 
 Options:
   --json                    Output AgentRuntimeEvent as JSON lines.
   --faux                    Use a local faux provider instead of DeepSeek.
   --faux-response <text>    Response text for --faux mode.
+  --agent-playground        Start an interactive AgentRuntime playground.
+  --call-tool <name>        Execute a registered tool directly without calling the model.
+  --tool-args <json>        JSON arguments for --call-tool. Defaults to {}.
+  --tool-cwd <path>         Working directory for built-in ToolOperations. Defaults to process cwd.
+  --approve-tool-call       Auto-approve policy approval requests in --call-tool mode.
+  --no-tool-policy          Disable default ToolPolicy in --call-tool mode.
   --example-resources       Register CLI-only example resources for prompt assembly testing.
   --example-tools           Register CLI-only example tools for prompt assembly testing.
   --model <id>              DeepSeek model id. Defaults to DEEPSEEK_MODEL_ID from .env or.
+  --request-timeout-ms <n>  Provider HTTP request timeout in milliseconds.
   --resources <a,b>         Enable host-registered resources by name.
   --tools <a,b>             Enable registered tools by name. Built-ins are registered by default: read,ls,grep,find,write,edit,bash.
   --print-resources         Print registered or selected resource metadata and exit without running the model.

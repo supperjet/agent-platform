@@ -36,6 +36,10 @@ export type AgentRuntimeEvent =
   | { type: "message_delta"; sessionId: string; messageId: string; channel: "text" | "thinking"; delta: string }
   | { type: "message_finished"; sessionId: string; messageId: string; role: AgentMessageRole; text: string }
   | { type: "tool_started"; sessionId: string; toolCallId: string; toolName: string; args: unknown }
+  | { type: "tool_policy_checked"; sessionId: string; toolCallId: string; toolName: string; decision: string; reason?: string }
+  | { type: "tool_approval_requested"; sessionId: string; toolCallId: string; toolName: string; title: string; message: string; risk?: "low" | "medium" | "high"; reason: string }
+  | { type: "tool_approval_approved"; sessionId: string; toolCallId: string; toolName: string }
+  | { type: "tool_approval_denied"; sessionId: string; toolCallId: string; toolName: string; reason: string }
   | { type: "tool_progress"; sessionId: string; toolCallId: string; text: string }
   | { type: "tool_finished"; sessionId: string; toolCallId: string; isError: boolean; text: string; sourceIds: string[] };
 

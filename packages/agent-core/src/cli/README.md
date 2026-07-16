@@ -29,6 +29,13 @@ Optional model override:
 npm run dev:core -- --model deepseek-v4-flash "测试模型"
 ```
 
+Provider request timeout override:
+
+```bash
+npm run dev:core -- --request-timeout-ms 600000 "测试较慢请求"
+npm run dev:core -- --agent-playground --request-timeout-ms 600000
+```
+
 Shell environment variables still take precedence over `.env`, and `--model` takes precedence over both.
 
 ## Faux Mode
@@ -60,6 +67,40 @@ npm run dev:core -- --json --faux --faux-response "JSON OK" "测试 json 输出"
 ```
 
 This is the closest current equivalent to Pi's `--mode json`: it is single-shot, terminal-friendly, and useful for inspecting event order during refactors.
+
+## Agent Runtime Playground
+
+Start an interactive playground for the full AgentRuntime execution path:
+
+```bash
+npm run dev:core -- --agent-playground
+```
+
+For local shell testing without a provider key:
+
+```bash
+npm run dev:core -- --faux --agent-playground
+```
+
+Inside the playground, ordinary input is sent as a prompt to the current runtime session. Slash commands control runtime configuration:
+
+```text
+/tools                 Show enabled tools.
+/tools all             Enable built-in tools.
+/tools none            Disable all tools.
+/tools read,ls,grep    Enable selected tools.
+/policy on|off         Toggle default ToolPolicy.
+/approve ask|always|never
+/events on|off|json    Toggle AgentRuntime and ToolRuntime event printing.
+/cwd <path>            Rebuild runtime with a new ToolOperations cwd.
+/state                 Print exported conversation state.
+/snapshot              Print runtime snapshot.
+/system                Print current assembled system prompt.
+/reset                 Reset conversation session.
+/exit                  Quit.
+```
+
+This mode exercises the whole path: `AgentDefinition -> RuntimeAssembler -> AgentLoop -> ToolRuntime -> ToolPolicy -> ToolOperations -> EventHub -> ConversationState`.
 
 ## Conversation State
 
@@ -100,7 +141,24 @@ Enable host-registered tools by comma-separated name. For local prompt assembly 
 npm run dev:core -- --example-tools --tools inspect_runtime,read_note "使用已注册工具回答"
 ```
 
-The CLI does not register built-in tools by default. `--example-tools` registers CLI-only test tools and does not affect the core default tool registry.
+The CLI registers built-in tool definitions for local testing. In prompt mode, only names passed through `--tools` are exposed to the model. `--example-tools` adds CLI-only test tools.
+
+### Direct Tool Execution
+
+Execute a registered tool directly without calling the model:
+
+```bash
+npm run dev:core -- --call-tool read --tool-args '{"path":"package.json","limit":5}'
+```
+
+The direct mode uses the built-in ToolOperations layer and ToolRuntime lifecycle events. By default it also uses the default ToolPolicy, so mutation tools and bash require approval:
+
+```bash
+npm run dev:core -- --call-tool write --tool-cwd /private/tmp --approve-tool-call --tool-args '{"path":"agent-core-cli-tool-test.txt","content":"hello\n"}'
+npm run dev:core -- --call-tool bash --approve-tool-call --tool-args '{"command":"pwd"}'
+```
+
+Use `--tool-cwd <path>` to choose the ToolOperations root. When omitted, the CLI uses the directory where `npm run dev:core` was invoked.
 
 Print registered tool metadata without running the model:
 

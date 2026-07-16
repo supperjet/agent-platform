@@ -5,6 +5,7 @@ export * from "./runtime/agent-runtime-factory.js";
 export * from "./resources/resource-catalog.js";
 export * from "./tools/built-in/index.js";
 export * from "./tools/operations/index.js";
+export * from "./tools/policy/index.js";
 export * from "./tools/tool-runtime.js";
 export * from "./tools/tool-registry.js";
 export * from "./tools/tool-catalog.js";

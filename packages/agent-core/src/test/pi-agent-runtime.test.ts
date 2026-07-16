@@ -15,7 +15,9 @@ import {
   createAgentToolRegistry,
   defineAgentTool,
   formatAgentDefinition,
+  requireToolApproval,
   PiAgentRuntimeFactory,
+  ToolRuntimeEventType,
   type AgentToolDefinition,
   type AgentRuntimeEvent
 } from "../index.js";
@@ -297,6 +299,86 @@ test("EventHub converts assistant errors into failed runtime outcomes", () => {
   });
 });
 
+test("EventHub bridges ToolRuntime policy and approval events into public runtime events", () => {
+  const eventHub = new EventHub({ sessionId: "session-tool-lifecycle" });
+  const events: AgentRuntimeEvent[] = [];
+  eventHub.subscribe((event) => events.push(event));
+
+  eventHub.publishToolRuntimeEvent({
+    type: ToolRuntimeEventType.PolicyChecked,
+    toolName: "write",
+    toolCallId: "tool:write",
+    args: { path: "notes.txt" },
+    decision: requireToolApproval("Tool \"write\" requires approval.", {
+      title: "Approve write",
+      message: "Allow write to access notes.txt.",
+      risk: "medium"
+    }),
+    timestamp: new Date()
+  });
+  eventHub.publishToolRuntimeEvent({
+    type: ToolRuntimeEventType.ApprovalRequested,
+    toolName: "write",
+    toolCallId: "tool:write",
+    args: { path: "notes.txt" },
+    decision: requireToolApproval("Tool \"write\" requires approval.", {
+      title: "Approve write",
+      message: "Allow write to access notes.txt.",
+      risk: "medium"
+    }),
+    timestamp: new Date()
+  });
+  eventHub.publishToolRuntimeEvent({
+    type: ToolRuntimeEventType.ApprovalApproved,
+    toolName: "write",
+    toolCallId: "tool:write",
+    args: { path: "notes.txt" },
+    timestamp: new Date()
+  });
+  eventHub.publishToolRuntimeEvent({
+    type: ToolRuntimeEventType.ApprovalDenied,
+    toolName: "write",
+    toolCallId: "tool:write",
+    args: { path: "notes.txt" },
+    reason: "denied by user",
+    timestamp: new Date()
+  });
+
+  assert.deepEqual(events, [
+    {
+      type: "tool_policy_checked",
+      sessionId: "session-tool-lifecycle",
+      toolCallId: "tool:write",
+      toolName: "write",
+      decision: "require_approval",
+      reason: "Tool \"write\" requires approval."
+    },
+    {
+      type: "tool_approval_requested",
+      sessionId: "session-tool-lifecycle",
+      toolCallId: "tool:write",
+      toolName: "write",
+      title: "Approve write",
+      message: "Allow write to access notes.txt.",
+      risk: "medium",
+      reason: "Tool \"write\" requires approval."
+    },
+    {
+      type: "tool_approval_approved",
+      sessionId: "session-tool-lifecycle",
+      toolCallId: "tool:write",
+      toolName: "write"
+    },
+    {
+      type: "tool_approval_denied",
+      sessionId: "session-tool-lifecycle",
+      toolCallId: "tool:write",
+      toolName: "write",
+      reason: "denied by user"
+    }
+  ]);
+});
+
 test("StateExporter syncs loop snapshots into entry graph state", () => {
   const firstMessage = createUserMessage("first");
   const secondMessage = createUserMessage("second");
@@ -377,6 +459,50 @@ test("creates a runtime from tools resolved by the registry", async () => {
   }
 });
 
+test("publishes ToolRuntime lifecycle events through the public runtime stream", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-tool-runtime-event-test" });
+  const updatingTool = createUpdatingTool();
+  registration.setResponses([
+    fauxAssistantMessage(fauxToolCall("updating_tool", { topic: "runtime" }), {
+      stopReason: "toolUse"
+    }),
+    fauxAssistantMessage(fauxText("Updated."))
+  ]);
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "tool-runtime-event-agent",
+      model: registration.getModel(),
+      instructions: ["Use updating_tool before answering."],
+      toolNames: ["updating_tool"]
+    }),
+    toolRegistry: createAgentToolRegistry([updatingTool]),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-tool-runtime-events");
+  const events: AgentRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+
+  try {
+    const outcome = await runtime.execute({ type: "prompt", text: "Inspect runtime events." });
+
+    assert.deepEqual(outcome, { status: "succeeded" });
+    const toolEvents = events.filter((event) =>
+      event.type === "tool_started" ||
+      event.type === "tool_progress" ||
+      event.type === "tool_finished"
+    );
+    assert.deepEqual(toolEvents.map((event) => event.type), [
+      "tool_started",
+      "tool_progress",
+      "tool_finished"
+    ]);
+    assert.equal(toolEvents[0]?.type === "tool_started" ? toolEvents[0].toolName : "", "updating_tool");
+    assert.equal(toolEvents[1]?.type === "tool_progress" ? toolEvents[1].text : "", "partial:runtime");
+    assert.equal(toolEvents[2]?.type === "tool_finished" ? toolEvents[2].text : "", "final:runtime");
+  } finally {
+    registration.unregister();
+  }
+});
+
 test("rejects duplicate tool registrations", () => {
   const inspectDefinitionTool = createInspectDefinitionTool();
 
@@ -442,6 +568,28 @@ function createInspectDefinitionTool(): AgentToolDefinition<typeof inspectDefini
     parameters: inspectDefinitionParameters,
     async execute(_toolCallId, params) {
       return { content: [{ type: "text", text: `Inspected ${params.topic}.` }], details: {} };
+    }
+  });
+}
+
+function createUpdatingTool(): AgentToolDefinition<typeof inspectDefinitionParameters> {
+  return defineAgentTool({
+    name: "updating_tool",
+    label: "Updating Tool",
+    description: "Emits a partial result before returning.",
+    promptSnippet: "Emit tool progress.",
+    promptGuidelines: ["Use updating_tool when testing tool runtime events."],
+    sourceInfo: { source: "sdk", label: "Test SDK" },
+    parameters: inspectDefinitionParameters,
+    async execute(_toolCallId, params, _signal, onUpdate) {
+      onUpdate?.({
+        content: [{ type: "text", text: `partial:${params.topic}` }],
+        details: {}
+      });
+      return {
+        content: [{ type: "text", text: `final:${params.topic}` }],
+        details: {}
+      };
     }
   });
 }
