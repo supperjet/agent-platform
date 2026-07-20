@@ -19,7 +19,6 @@ import {
   wrapAgentToolDefinition
 } from "../tools/tool-registry.js";
 import { ToolCatalog } from "../tools/tool-catalog.js";
-import { createToolRuntime } from "../tools/tool-runtime.js";
 
 test("assembles static instructions into a prompt plan", () => {
   const registration = registerFauxProvider({ provider: "runtime-assembler-static-test" });
@@ -45,7 +44,7 @@ test("assembles static instructions into a prompt plan", () => {
     assert.equal(assembly.model.id, registration.getModel().id);
     assert.deepEqual(assembly.messages, []);
     assert.deepEqual(assembly.resources.promptFragments, []);
-    assert.equal(assembly.lifecycle.name, "default");
+    assert.deepEqual(assembly.lifecycle, {});
     assert.equal(assembly.policies.queue, "direct");
   } finally {
     registration.unregister();
@@ -229,14 +228,14 @@ test("wraps assembled tools with ToolRuntime lifecycle hooks", async () => {
   const assembler = new RuntimeAssembler({
     toolRegistry: createAgentToolRegistry([inspectTool]),
     services: {
-      toolRuntime: createToolRuntime({
+      lifecycleHooks: {
         beforeToolCall: [({ toolCallId, context }) => {
           calls.push(`before:${toolCallId}:${context?.sessionId}:${context?.definitionId}`);
         }],
         afterToolCall: [({ status }) => {
           calls.push(`after:${status}`);
         }]
-      })
+      }
     }
   });
 

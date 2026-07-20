@@ -2,6 +2,8 @@ export * from "./contracts.js";
 export * from "./definition/agent-definition.js";
 export * from "./definition/definition-resolver.js";
 export * from "./runtime/agent-runtime-factory.js";
+export * from "./lifecycle/lifecycle-hooks.js";
+export * from "./lifecycle/lifecycle-runner.js";
 export * from "./resources/resource-catalog.js";
 export * from "./tools/built-in/index.js";
 export * from "./tools/operations/index.js";

@@ -3,13 +3,14 @@ import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import {
   createToolRuntime,
+  createLifecycleRunner,
   blockTool,
   createDefaultToolPolicy,
   defineAgentTool,
   requireToolApproval,
   rewriteToolArgs,
   wrapToolWithRuntime,
-  type AfterToolCallInput,
+  type AfterToolCallHookInput,
   type AgentToolDefinition,
   ToolRuntimeEventType,
   type ToolRuntimeEvent
@@ -26,12 +27,14 @@ test("ToolRuntime runs before and after hooks around successful tool execution",
     return { content: [{ type: "text", text: `done:${params.topic}` }], details: { topic: params.topic } };
   });
   const runtime = createToolRuntime({
-    beforeToolCall: [({ toolCallId }) => {
-      calls.push(`before:${toolCallId}`);
-    }],
-    afterToolCall: [({ status, result }) => {
-      calls.push(`after:${status}:${readText(result)}`);
-    }]
+    lifecycleRunner: createLifecycleRunner({
+      beforeToolCall: [({ toolCallId }) => {
+        calls.push(`before:${toolCallId}`);
+      }],
+      afterToolCall: [({ status, result }) => {
+        calls.push(`after:${status}:${readText(result)}`);
+      }]
+    })
   });
 
   const result = await runtime.execute({
@@ -52,16 +55,18 @@ test("ToolRuntime runs before and after hooks around successful tool execution",
 
 test("ToolRuntime blocks execution when a before hook denies the call", async () => {
   let executed = false;
-  const afterCalls: AfterToolCallInput[] = [];
+  const afterCalls: AfterToolCallHookInput[] = [];
   const tool = createRuntimeTool(async () => {
     executed = true;
     return { content: [{ type: "text", text: "should not run" }], details: {} };
   });
   const runtime = createToolRuntime({
-    beforeToolCall: [() => ({ allow: false, reason: "policy denied" })],
-    afterToolCall: [(input) => {
-      afterCalls.push(input);
-    }]
+    lifecycleRunner: createLifecycleRunner({
+      beforeToolCall: [() => ({ allow: false, reason: "policy denied" })],
+      afterToolCall: [(input) => {
+        afterCalls.push(input);
+      }]
+    })
   });
 
   const result = await runtime.execute({
@@ -131,7 +136,9 @@ test("ToolRuntime emits terminal events for blocked and failed calls", async () 
     return { content: [{ type: "text", text: "should not run" }], details: {} };
   });
   const blockedRuntime = createToolRuntime({
-    beforeToolCall: [() => ({ allow: false, reason: "policy denied" })],
+    lifecycleRunner: createLifecycleRunner({
+      beforeToolCall: [() => ({ allow: false, reason: "policy denied" })]
+    }),
     onEvent: (event) => {
       blockedEvents.push(event);
     }
@@ -351,7 +358,9 @@ test("wrapped tools forward updates and throw normalized runtime failures", asyn
   assert.deepEqual(updates, ["partial:core"]);
 
   const blocked = wrapToolWithRuntime(tool, createToolRuntime({
-    beforeToolCall: [() => false]
+    lifecycleRunner: createLifecycleRunner({
+      beforeToolCall: [() => false]
+    })
   }));
   await assert.rejects(
     () => blocked.execute("tool:wrapped-blocked", { topic: "core" }),

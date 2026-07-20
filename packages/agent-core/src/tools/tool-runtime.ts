@@ -9,6 +9,10 @@ import {
   type ToolPolicy,
   type ToolPolicyDecision,
 } from "./policy/index.js";
+import {
+  createLifecycleRunner,
+  type LifecycleRunner,
+} from "../lifecycle/lifecycle-runner.js";
 
 // ---------------------------------------------------------------------------
 // 工具执行结果与上下文
@@ -217,76 +221,18 @@ export type ToolRuntimeEvent<TDetails = any> =
 export type ToolRuntimeEventListener = (event: ToolRuntimeEvent) => void;
 
 // ---------------------------------------------------------------------------
-// 执行前/执行后 Hook
-// ---------------------------------------------------------------------------
-
-/**
- * before hook 收到的输入。
- *
- * before hook 发生在工具本体执行前，可用于权限检查、approval、审计预检等。
- */
-export type BeforeToolCallInput<TDetails = any> = {
-  tool: AgentTool<any, TDetails>;
-  toolCallId: string;
-  args: unknown;
-  signal?: AbortSignal;
-  context?: ToolRuntimeContext;
-};
-
-/**
- * before hook 的决策结果。
- *
- * - `undefined`：默认允许。
- * - `true` / `{ allow: true }`：允许。
- * - `false` / `{ allow: false }`：阻止，并返回 blocked 状态。
- */
-export type BeforeToolCallDecision =
-  | void
-  | boolean
-  | {
-      allow: boolean;
-      reason?: string;
-    };
-
-/** 单个执行前 hook，可同步或异步返回决策。 */
-export type BeforeToolCallHook = (
-  input: BeforeToolCallInput,
-) => BeforeToolCallDecision | Promise<BeforeToolCallDecision>;
-
-/**
- * after hook 收到的输入。
- *
- * after hook 总是在 Runtime 已经形成终态后执行；它能看到结果或错误，
- * 适合做审计记录、指标统计、事件桥接等。
- */
-export type AfterToolCallInput<TDetails = any> = {
-  tool: AgentTool<any, TDetails>;
-  toolCallId: string;
-  args: unknown;
-  status: ToolRuntimeStatus;
-  result?: AgentToolResult<TDetails>;
-  error?: ToolRuntimeError;
-  context?: ToolRuntimeContext;
-};
-
-/** 单个执行后 hook。 */
-export type AfterToolCallHook = (
-  input: AfterToolCallInput,
-) => void | Promise<void>;
-
-// ---------------------------------------------------------------------------
 // Runtime 对外接口
 // ---------------------------------------------------------------------------
 
 /**
  * 创建 ToolRuntime 时可注入的扩展点。
  *
- * 当前第一版只提供 before/after hook 和生命周期事件；后续可以在这里继续加入
- * approval 策略、事件桥接、超时策略等运行时能力。
+ * ToolRuntime 不再拥有自己的 before/after hook 定义；工具调用前后的控制点
+ * 统一挂在 LifecycleRunner 上。这里保留工具执行网关真正负责的能力：
+ * policy、approval 和对外观测事件。
  */
 export type ToolRuntimeOptions = {
-  beforeToolCall?: readonly BeforeToolCallHook[];
-  afterToolCall?: readonly AfterToolCallHook[];
+  lifecycleRunner?: LifecycleRunner;
   policy?: ToolPolicy;
   approvalHandler?: ToolApprovalHandler;
   // 工具生命周期事件监听器
@@ -309,13 +255,13 @@ export type ToolRuntime = {
  * 创建默认工具运行时。
  *
  * ToolRuntime 不负责注册或选择工具，只负责包住一次工具调用：
- * before hook -> 原始 tool.execute -> after hook -> 结构化执行结果。
+ * lifecycle.beforeToolCall -> policy/approval -> 原始 tool.execute
+ * -> lifecycle.afterToolCall -> 结构化执行结果。
  */
 export function createToolRuntime(
   options: ToolRuntimeOptions = {},
 ): ToolRuntime {
-  const beforeHooks = options.beforeToolCall ?? [];
-  const afterHooks = options.afterToolCall ?? [];
+  const lifecycleRunner = options.lifecycleRunner ?? createLifecycleRunner();
   const policy = options.policy;
   const approvalHandler = options.approvalHandler;
   const defaultOnEvent = options.onEvent;
@@ -352,9 +298,9 @@ export function createToolRuntime(
           );
         }
 
-        // before hook 是底层执行控制点，任何一个 hook 返回 deny 都会短路工具调用。
-        const blockReason = await runBeforeHooks(beforeHooks, input);
-        if (blockReason) {
+        // 工具执行前的控制点统一交给 LifecycleRunner；这里不再维护平行 hook 链。
+        const beforeResult = await lifecycleRunner.beforeToolCall(input);
+        if (beforeResult.status === "blocked") {
           return finish(
             input,
             "blocked",
@@ -363,17 +309,23 @@ export function createToolRuntime(
             undefined,
             {
               name: "ToolBlockedError",
-              message: blockReason,
+              message: beforeResult.reason,
             },
           );
         }
+        const lifecycleInput = beforeResult.args === input.args
+          ? input
+          : {
+              ...input,
+              args: beforeResult.args,
+            };
 
         // policy 是正式的安全/权限/approval 语义层。它可以允许、阻止、改写参数，
         // 或要求宿主先确认。
-        const policyResult = await runToolPolicy(policy, approvalHandler, input, onEvent);
+        const policyResult = await runToolPolicy(policy, approvalHandler, lifecycleInput, onEvent);
         if (policyResult.status === "blocked") {
           return finish(
-            input,
+            lifecycleInput,
             "blocked",
             startedAt,
             onEvent,
@@ -384,10 +336,10 @@ export function createToolRuntime(
             },
           );
         }
-        const effectiveInput = policyResult.args === input.args
-          ? input
+        const effectiveInput = policyResult.args === lifecycleInput.args
+          ? lifecycleInput
           : {
-              ...input,
+              ...lifecycleInput,
               args: policyResult.args,
             };
 
@@ -435,7 +387,7 @@ export function createToolRuntime(
     };
 
     try {
-      await runAfterHooks(afterHooks, {
+      const lifecycleResult = await lifecycleRunner.afterToolCall({
         tool: input.tool,
         toolCallId: input.toolCallId,
         args: input.args,
@@ -444,8 +396,16 @@ export function createToolRuntime(
         ...(error ? { error } : {}),
         ...(input.context ? { context: input.context } : {}),
       });
-      emitToolRuntimeEvent(onEvent, createFinishedEvent(input, output));
-      return output;
+      const finalOutput: ToolRuntimeExecuteResult<TDetails> = lifecycleResult
+        ? {
+            ...output,
+            status: lifecycleResult.status ?? output.status,
+            ...(lifecycleResult.result !== undefined ? { result: lifecycleResult.result } : {}),
+            ...(lifecycleResult.error !== undefined ? { error: lifecycleResult.error } : {}),
+          }
+        : output;
+      emitToolRuntimeEvent(onEvent, createFinishedEvent(input, finalOutput));
+      return finalOutput;
     } catch (hookError) {
       // 非成功态的工具调用已经失败/取消/阻止；after hook 抛错不覆盖原终态。
       if (status !== "succeeded") {
@@ -515,22 +475,6 @@ export function wrapToolsWithRuntime(
 // ---------------------------------------------------------------------------
 // 内部辅助函数
 // ---------------------------------------------------------------------------
-
-/**
- * 顺序执行 before hooks。
- *
- * 返回 undefined 表示允许继续；返回字符串表示被阻止，并携带阻止原因。
- */
-async function runBeforeHooks(
-  hooks: readonly BeforeToolCallHook[],
-  input: BeforeToolCallInput,
-): Promise<string | undefined> {
-  for (const hook of hooks) {
-    const decision = normalizeBeforeDecision(await hook(input));
-    if (!decision.allow) return decision.reason ?? "Tool call blocked.";
-  }
-  return undefined;
-}
 
 /**
  * 执行 ToolPolicy，并处理 rewrite / block / approval。
@@ -619,29 +563,6 @@ async function runToolPolicy(
     timestamp: new Date(),
   });
   return { status: "blocked", reason: decision.reason };
-}
-
-/** 顺序执行 after hooks；调用方负责决定 hook 抛错时如何处理。 */
-async function runAfterHooks(
-  hooks: readonly AfterToolCallHook[],
-  input: AfterToolCallInput,
-) {
-  for (const hook of hooks) {
-    await hook(input);
-  }
-}
-
-/** 把 before hook 的多种便捷返回形式归一化成 `{ allow, reason }`。 */
-function normalizeBeforeDecision(decision: BeforeToolCallDecision): {
-  allow: boolean;
-  reason?: string;
-} {
-  if (decision === undefined) return { allow: true };
-  if (typeof decision === "boolean") return { allow: decision };
-  return {
-    allow: decision.allow,
-    ...(decision.reason ? { reason: decision.reason } : {}),
-  };
 }
 
 /**

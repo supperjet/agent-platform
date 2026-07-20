@@ -7,9 +7,12 @@ import type { AgentDefinition } from "../definition/agent-definition.js";
 import type { AgentResourceRegistry } from "../resources/resource-catalog.js";
 import type { AgentToolRegistry } from "../tools/tool-registry.js";
 import type { ToolRuntime } from "../tools/tool-runtime.js";
+import type { LifecycleHooks } from "../lifecycle/lifecycle-hooks.js";
+import { createLifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { AgentLoopAdapter } from "./agent-loop-adapter.js";
 import { AgentRuntimeSession } from "./agent-runtime-session.js";
 import { RuntimeAssembler } from "./runtime-assembler.js";
+import type { RuntimeAssemblerOptions } from "./runtime-assembler.js";
 
 /**
  * 创建 PiAgentRuntimeFactory 所需的外部依赖。
@@ -26,6 +29,8 @@ export type PiAgentRuntimeFactoryOptions = {
   toolRegistry?: AgentToolRegistry;
   /** 可选工具运行时；用于注入 policy、approval、生命周期监听等执行控制能力。 */
   toolRuntime?: ToolRuntime;
+  /** 可选内部生命周期 hooks；由 factory 接入 TurnRunner 和默认 ToolRuntime。 */
+  lifecycleHooks?: LifecycleHooks;
   /** Provider HTTP request timeout in milliseconds. */
   requestTimeoutMs?: number;
   /** Provider API key 解析函数，避免 key 进入 client/public event。 */
@@ -53,17 +58,22 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
 
   create(sessionId: string, state?: AgentConversationState) {
     // 组装运行时
-    const assembler = new RuntimeAssembler({
-      ...(this.options.resourceRegistry
-        ? { resourceRegistry: this.options.resourceRegistry }
-        : {}),
-      ...(this.options.toolRegistry
-        ? { toolRegistry: this.options.toolRegistry }
-        : {}),
-      ...(this.options.toolRuntime
-        ? { services: { toolRuntime: this.options.toolRuntime } }
-        : {}),
-    });
+    const assemblerParams: RuntimeAssemblerOptions = {};
+
+    if (this.options.resourceRegistry) {
+      assemblerParams.resourceRegistry = this.options.resourceRegistry;
+    }
+    if (this.options.toolRegistry) {
+      assemblerParams.toolRegistry = this.options.toolRegistry;
+    }
+    if (this.options.toolRuntime || this.options.lifecycleHooks) {
+      assemblerParams.services = {
+        ...(this.options.toolRuntime ? { toolRuntime: this.options.toolRuntime } : {}),
+        ...(this.options.lifecycleHooks ? { lifecycleHooks: this.options.lifecycleHooks } : {}),
+      };
+    }
+
+    const assembler = new RuntimeAssembler(assemblerParams);
     let runtime: AgentRuntimeSession | undefined;
     // 组装阶段会把工具包成 ToolRuntime wrapper；工具真正执行时，
     // 这个闭包会把 ToolRuntimeEvent 转发给当前 session 的 EventHub。
@@ -100,6 +110,8 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
       assembly.conversation,
       assembly.messages.length,
       true,
+      createLifecycleRunner(assembly.lifecycle),
+      assembly.systemPrompt,
     );
 
     // 如果 factory 级别传入 onEvent，就自动订阅这个 runtime 的公共事件流。

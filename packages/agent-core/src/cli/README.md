@@ -92,6 +92,7 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 /policy on|off         Toggle default ToolPolicy.
 /approve ask|always|never
 /events on|off|json    Toggle AgentRuntime and ToolRuntime event printing.
+/lifecycle on|off|json Toggle LifecycleRunner hook logging.
 /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
 /state                 Print exported conversation state.
 /snapshot              Print runtime snapshot.
@@ -100,7 +101,141 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 /exit                  Quit.
 ```
 
-This mode exercises the whole path: `AgentDefinition -> RuntimeAssembler -> AgentLoop -> ToolRuntime -> ToolPolicy -> ToolOperations -> EventHub -> ConversationState`.
+This mode exercises the whole path: `AgentDefinition -> RuntimeAssembler -> LifecycleRunner -> AgentLoop -> ToolRuntime -> ToolPolicy -> ToolOperations -> EventHub -> ConversationState`.
+
+Lifecycle logging is useful while developing hook boundaries:
+
+```text
+/lifecycle on
+hello lifecycle
+```
+
+For machine-readable hook traces:
+
+```text
+/lifecycle json
+请使用 read 工具读取 package.json
+```
+
+Prompt execution currently logs `onInput`, `beforeRun`, `beforeContext`, `afterMessage`, and `afterRun`. Tool execution logs `beforeToolCall` and `afterToolCall` when the model calls a tool. `beforeCompaction` is defined but will only appear once compaction is wired into the run pipeline.
+
+### Lifecycle Hook Examples
+
+The playground's `/lifecycle on|json` command installs logging hooks. In a real composition root or test, pass `LifecycleHooks` into the factory and the same hook set into `ToolRuntime` through `createLifecycleRunner(...)`:
+
+```ts
+import {
+  PiAgentRuntimeFactory,
+  createLifecycleRunner,
+  createToolRuntime,
+  type LifecycleHooks,
+} from "@agent-platform/agent-core";
+
+const lifecycleHooks: LifecycleHooks = {
+  onInput: [
+    ({ command }) => {
+      if (command.type === "prompt" && command.text === "/health") {
+        console.log("runtime ok");
+        return { action: "handled" };
+      }
+
+      if (command.type === "prompt" && command.text.startsWith("/review ")) {
+        return {
+          action: "transform",
+          command: {
+            type: "prompt",
+            text: `请 review 这个目标，优先指出 bug、风险和缺失测试：${command.text.slice("/review ".length)}`,
+          },
+        };
+      }
+
+      return { action: "continue" };
+    },
+  ],
+
+  beforeRun: [
+    ({ systemPrompt }) => ({
+      systemPrompt: `${systemPrompt}\n\n本轮临时要求：回答前先说明你检查了哪些上下文。`,
+    }),
+  ],
+
+  beforeContext: [
+    ({ messages }) => ({
+      messages: [
+        ...messages,
+        {
+          role: "user",
+          content: "临时上下文：本轮优先遵守 agent-core/core-server/client 的包边界。",
+          timestamp: Date.now(),
+        },
+      ],
+    }),
+  ],
+
+  beforeToolCall: [
+    ({ tool, args }) => {
+      if (tool.name !== "bash") return;
+      const command = typeof args === "object" && args && "command" in args
+        ? String(args.command)
+        : "";
+
+      if (command.includes("git reset --hard")) {
+        return {
+          allow: false,
+          reason: "lifecycle blocked destructive git reset.",
+        };
+      }
+    },
+  ],
+
+  afterToolCall: [
+    ({ result }) => {
+      if (!result) return;
+      return {
+        result: {
+          ...result,
+          content: result.content.map((block) => {
+            if (block.type !== "text") return block;
+            return {
+              ...block,
+              text: block.text.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED_KEY]"),
+            };
+          }),
+        },
+      };
+    },
+  ],
+
+  afterRun: [
+    ({ status }) => {
+      console.log(`[lifecycle] run finished: ${status}`);
+    },
+  ],
+};
+
+const toolRuntime = createToolRuntime({
+  lifecycleRunner: createLifecycleRunner(lifecycleHooks),
+});
+
+const factory = new PiAgentRuntimeFactory({
+  definition,
+  toolRegistry,
+  resourceRegistry,
+  toolRuntime,
+  lifecycleHooks,
+  resolveApiKey,
+});
+```
+
+Useful patterns:
+
+- `onInput`: expand slash commands, normalize prompt text, or handle local commands without calling the model.
+- `beforeRun`: add per-run system prompt overrides or internal messages.
+- `beforeContext`: append temporary memory, skill text, or run-local context. Current `TurnRunner` wiring requires preserving the existing conversation prefix.
+- `beforeToolCall`: block risky tool calls or rewrite tool args.
+- `afterToolCall`: redact secrets, normalize details, or mark unsafe output as an error.
+- `afterMessage`: observe finalized messages and extract memory/artifact candidates.
+- `afterRun`: cleanup and diagnostics.
 
 ## Conversation State
 

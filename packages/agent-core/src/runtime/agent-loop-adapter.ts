@@ -1,7 +1,7 @@
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import { streamSimple } from "@earendil-works/pi-ai/base";
 import type { AgentModel } from "../contracts.js";
-import type { AgentLoop, AgentLoopSnapshot } from "./agent-loop.js";
+import type { AgentLoop, AgentLoopPromptOptions, AgentLoopSnapshot } from "./agent-loop.js";
 
 /**
  * 创建 pi-agent-core Agent 所需的装配结果。
@@ -52,9 +52,19 @@ export class AgentLoopAdapter implements AgentLoop {
     });
   }
 
-  async prompt(message: AgentMessage | AgentMessage[]): Promise<void> {
-    // prompt 会启动一次底层 agent 执行。
-    await this.agent.prompt(message);
+  async prompt(message: AgentMessage | AgentMessage[], options: AgentLoopPromptOptions = {}): Promise<void> {
+    // prompt 会启动一次底层 agent 执行。systemPrompt override 只作用于本次 run。
+    const previousSystemPrompt = this.agent.state.systemPrompt;
+    if (options.systemPrompt !== undefined) {
+      this.agent.state.systemPrompt = options.systemPrompt;
+    }
+    try {
+      await this.agent.prompt(message);
+    } finally {
+      if (options.systemPrompt !== undefined) {
+        this.agent.state.systemPrompt = previousSystemPrompt;
+      }
+    }
   }
 
   async continue(): Promise<void> {

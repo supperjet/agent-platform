@@ -7,11 +7,13 @@ import {
   createAgentToolRegistry,
   createBuiltInToolDefinitions,
   createDefaultToolPolicy,
+  createLifecycleRunner,
   createLocalToolOperations,
   createToolRuntime,
   formatAgentDefinition,
   PiAgentRuntimeFactory,
   type AgentRuntimeEvent,
+  type LifecycleHooks,
 } from "../index.js";
 import type { AgentResourceDefinition } from "../resources/resource-catalog.js";
 import type { AnyAgentToolDefinition } from "../tools/tool-registry.js";
@@ -23,6 +25,7 @@ import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
 
 type ApprovalMode = "ask" | "always" | "never";
 type EventMode = "off" | "on" | "json";
+type LifecycleMode = "off" | "on" | "json";
 
 export type AgentPlaygroundOptions = {
   model: AgentModel;
@@ -43,6 +46,7 @@ type PlaygroundState = {
   policyEnabled: boolean;
   approvalMode: ApprovalMode;
   eventMode: EventMode;
+  lifecycleMode: LifecycleMode;
   runtime: AgentRuntime;
   lastSystemPrompt: string;
 };
@@ -72,6 +76,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       policyEnabled: state?.policyEnabled ?? true,
       approvalMode: state?.approvalMode ?? "ask",
       eventMode: state?.eventMode ?? (options.json ? "json" : "on"),
+      lifecycleMode: state?.lifecycleMode ?? "off",
     }, previousState);
     state = next;
   };
@@ -124,7 +129,9 @@ function createRuntimeState(
     toolNames: config.toolNames,
     resourceNames: config.resourceNames,
   });
+  const lifecycleHooks = createPlaygroundLifecycleHooks(config.lifecycleMode);
   const toolRuntime = createToolRuntime({
+    lifecycleRunner: createLifecycleRunner(lifecycleHooks),
     ...(config.policyEnabled ? { policy: createDefaultToolPolicy() } : {}),
     approvalHandler: createApprovalHandler(config, rl),
     onEvent: (event) => printToolRuntimeEvent(event, config.eventMode),
@@ -134,6 +141,7 @@ function createRuntimeState(
     resourceRegistry,
     toolRegistry,
     toolRuntime,
+    lifecycleHooks,
     resolveApiKey: options.resolveApiKey,
     ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
   });
@@ -143,7 +151,58 @@ function createRuntimeState(
   return {
     ...config,
     runtime,
-    lastSystemPrompt: createSystemPromptPreview(options, definition, resourceRegistry, toolRegistry, toolRuntime),
+    lastSystemPrompt: createSystemPromptPreview(options, definition, resourceRegistry, toolRegistry, toolRuntime, lifecycleHooks),
+  };
+}
+
+function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
+  if (mode === "off") return {};
+
+  return {
+    onInput: [({ command }) => {
+      printLifecycleEvent(mode, "onInput", { commandType: command.type });
+      return { action: "continue" };
+    }],
+    beforeRun: [({ command, systemPrompt }) => {
+      printLifecycleEvent(mode, "beforeRun", {
+        commandType: command.type,
+        systemPromptLength: systemPrompt.length,
+      });
+    }],
+    beforeContext: [({ messages, systemPrompt }) => {
+      printLifecycleEvent(mode, "beforeContext", {
+        messageCount: messages.length,
+        systemPromptLength: systemPrompt.length,
+      });
+    }],
+    beforeToolCall: [({ tool, toolCallId, args }) => {
+      printLifecycleEvent(mode, "beforeToolCall", {
+        toolName: tool.name,
+        toolCallId,
+        args,
+      });
+    }],
+    afterToolCall: [({ tool, toolCallId, status }) => {
+      printLifecycleEvent(mode, "afterToolCall", {
+        toolName: tool.name,
+        toolCallId,
+        status,
+      });
+    }],
+    afterMessage: [({ message }) => {
+      printLifecycleEvent(mode, "afterMessage", {
+        role: message.role,
+      });
+    }],
+    beforeCompaction: [({ reason, willRetry }) => {
+      printLifecycleEvent(mode, "beforeCompaction", {
+        reason,
+        willRetry,
+      });
+    }],
+    afterRun: [({ status }) => {
+      printLifecycleEvent(mode, "afterRun", { status });
+    }],
   };
 }
 
@@ -201,6 +260,12 @@ async function handleCommand(
     stdout.write(`events: ${state.eventMode}\n`);
     return true;
   }
+  if (command === "lifecycle") {
+    state.lifecycleMode = parseLifecycleMode(value);
+    rebuildRuntime(true);
+    stdout.write(`lifecycle: ${state.lifecycleMode}\n`);
+    return true;
+  }
   if (command === "cwd") {
     if (!value) {
       stdout.write(`cwd: ${state.cwd}\n`);
@@ -240,11 +305,12 @@ function createSystemPromptPreview(
   resourceRegistry: ReturnType<typeof createAgentResourceRegistry>,
   toolRegistry: ReturnType<typeof createAgentToolRegistry>,
   toolRuntime: ReturnType<typeof createToolRuntime>,
+  lifecycleHooks: LifecycleHooks,
 ) {
   const assembly = new RuntimeAssembler({
     resourceRegistry,
     toolRegistry,
-    services: { toolRuntime },
+    services: { toolRuntime, lifecycleHooks },
   }).assemble({
     sessionId: "agent-core-playground-system-preview",
     definition,
@@ -275,6 +341,18 @@ function printToolRuntimeEvent(event: ToolRuntimeEvent, mode: EventMode) {
   stderr.write(`[tool-runtime:${event.type}] ${event.toolName}:${event.toolCallId}\n`);
 }
 
+function printLifecycleEvent(mode: LifecycleMode, hook: string, data: Record<string, unknown>) {
+  if (mode === "off") return;
+  if (mode === "json") {
+    stderr.write(`${JSON.stringify({ source: "lifecycle", hook, data })}\n`);
+    return;
+  }
+  const details = Object.entries(data)
+    .map(([key, value]) => `${key}=${formatLifecycleValue(value)}`)
+    .join(" ");
+  stderr.write(`[lifecycle:${hook}]${details ? ` ${details}` : ""}\n`);
+}
+
 function parseNameList(value: string, allNames: readonly string[]) {
   if (value === "all") return [...allNames];
   if (value === "none") return [];
@@ -297,13 +375,25 @@ function parseEventMode(value: string): EventMode {
   throw new Error('/events expects "on", "off", or "json".');
 }
 
+function parseLifecycleMode(value: string): LifecycleMode {
+  if (value === "on" || value === "off" || value === "json") return value;
+  throw new Error('/lifecycle expects "on", "off", or "json".');
+}
+
+function formatLifecycleValue(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
 function printIntro(state: PlaygroundState | undefined) {
   stdout.write("Agent Runtime Playground\n");
   stdout.write("Type /help for commands, /exit to quit.\n");
   if (state) {
     stdout.write(`cwd: ${state.cwd}\n`);
     stdout.write(`tools: ${state.toolNames.join(", ")}\n`);
-    stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}\n`);
+    stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}, lifecycle: ${state.lifecycleMode}\n`);
   }
 }
 
@@ -316,6 +406,7 @@ function printHelp() {
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.
+  /lifecycle on|off|json Toggle LifecycleRunner hook logging.
   /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
   /state                 Print exported conversation state.
   /snapshot              Print runtime snapshot.

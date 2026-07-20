@@ -1,5 +1,10 @@
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 
+export type AgentLoopPromptOptions = {
+  /** 仅作用于本次 prompt run 的 system prompt override。 */
+  systemPrompt?: string;
+};
+
 /**
  * AgentLoop 的最小状态快照。
  *
@@ -23,7 +28,7 @@ export type AgentLoopSnapshot = {
  */
 export type AgentLoop = {
   /** 发送用户 prompt，并启动一次 agent 回合。 */
-  prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
+  prompt(message: AgentMessage | AgentMessage[], options?: AgentLoopPromptOptions): Promise<void>;
   /** 让底层 agent 从当前状态继续执行。 */
   continue(): Promise<void>;
   /** 在运行中插入 steering 消息，影响当前执行方向。 */

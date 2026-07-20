@@ -13,6 +13,7 @@ import {
   createDefaultLifecycleHooks,
   type LifecycleHooks,
 } from "../lifecycle/lifecycle-hooks.js";
+import { createLifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { ModelCatalog } from "../model/model-catalog.js";
 import { ModelGateway, type ApiKeyResolver } from "../model/model-gateway.js";
 import {
@@ -216,18 +217,18 @@ export class RuntimeAssembler {
 function createRuntimeAssemblerServices(
   options: RuntimeAssemblerOptions,
 ): RuntimeAssemblerServices {
+  const lifecycleHooks = options.services?.lifecycleHooks ?? createDefaultLifecycleHooks();
   const defaultServices: RuntimeAssemblerServices = {
     definitionResolver: new DefinitionResolver(),
     resourceCatalog: new ResourceCatalog(options.resourceRegistry),
     promptAssembler: new PromptAssembler(),
     toolCatalog: new ToolCatalog(options.toolRegistry),
     toolRuntime: createToolRuntime({
-      beforeToolCall: [],
-      afterToolCall: [],
+      lifecycleRunner: createLifecycleRunner(lifecycleHooks),
     }),
     conversationStore: new ConversationStore(),
     modelCatalog: new ModelCatalog(),
-    lifecycleHooks: createDefaultLifecycleHooks(),
+    lifecycleHooks,
     policies: createDefaultRuntimePolicies(),
   };
 

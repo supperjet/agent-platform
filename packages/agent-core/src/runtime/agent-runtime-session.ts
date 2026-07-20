@@ -6,6 +6,7 @@ import {
   type AgentRuntimeEventListener,
 } from "../contracts.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
+import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
 import type { AgentLoop } from "./agent-loop.js";
 import { EventHub } from "./event-hub.js";
@@ -32,6 +33,8 @@ export class AgentRuntimeSession extends AgentRuntime {
     conversation: ConversationRuntimeState,
     initialMessageSequence = 0,
     preferToolRuntimeEvents = false,
+    lifecycleRunner?: LifecycleRunner,
+    systemPrompt?: string,
   ) {
     super();
     // 创建事件中心
@@ -50,10 +53,17 @@ export class AgentRuntimeSession extends AgentRuntime {
       readExecutionOutcome: () => this.eventHub.readExecutionOutcome(),
       afterTurn: () =>
         this.stateExporter.syncFromSnapshot(this.loop.snapshot()),
+      ...(lifecycleRunner ? { lifecycleRunner } : {}),
+      ...(systemPrompt !== undefined ? { systemPrompt } : {}),
     });
 
     // 订阅底层 loop 事件，并交给 EventHub 转成 AgentRuntimeEvent。
-    this.loop.subscribe((event) => this.eventHub.publishAgentEvent(event));
+    this.loop.subscribe((event) => {
+      if (event.type === "message_end") {
+        void lifecycleRunner?.afterMessage({ message: event.message });
+      }
+      this.eventHub.publishAgentEvent(event);
+    });
   }
 
   /**

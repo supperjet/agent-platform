@@ -23,8 +23,9 @@ import {
 } from "../index.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
 import { AgentRuntimeSession } from "../runtime/agent-runtime-session.js";
-import type { AgentLoop, AgentLoopSnapshot } from "../runtime/agent-loop.js";
+import type { AgentLoop, AgentLoopPromptOptions, AgentLoopSnapshot } from "../runtime/agent-loop.js";
 import { EventHub } from "../runtime/event-hub.js";
+import { createLifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { createUserMessage } from "../runtime/messages.js";
 import { StateExporter } from "../runtime/state-exporter.js";
 import { TurnRunner } from "../runtime/turn-runner.js";
@@ -227,6 +228,79 @@ test("TurnRunner dispatches commands through an AgentLoop", async () => {
   assert.deepEqual(loop.calls, ["prompt", "waitForIdle", "steer", "followUp", "abort"]);
   assert.equal(afterTurnCount, 3);
   assert.deepEqual(loop.snapshot().messages.map((message) => message.role), ["user", "user", "user"]);
+});
+
+test("TurnRunner emits lifecycle hooks around prompt execution", async () => {
+  const loop = new FakeAgentLoop("runner-lifecycle-model");
+  const calls: string[] = [];
+  const runner = new TurnRunner({
+    loop,
+    readExecutionOutcome: () => ({ status: "succeeded" }),
+    lifecycleRunner: createLifecycleRunner({
+      onInput: [({ command }) => {
+        calls.push(`onInput:${command.type}`);
+      }],
+      beforeRun: [({ command }) => {
+        calls.push(`beforeRun:${command.type}`);
+      }],
+      beforeContext: [({ messages }) => {
+        calls.push(`beforeContext:${messages.length}`);
+      }],
+      afterRun: [({ status }) => {
+        calls.push(`afterRun:${status}`);
+      }]
+    }),
+    systemPrompt: "base prompt"
+  });
+
+  assert.deepEqual(await runner.run({ type: "prompt", text: "hello" }), { status: "succeeded" });
+
+  assert.deepEqual(calls, [
+    "onInput:prompt",
+    "beforeRun:prompt",
+    "beforeContext:1",
+    "afterRun:succeeded"
+  ]);
+  assert.deepEqual(loop.calls, ["prompt", "waitForIdle"]);
+});
+
+test("TurnRunner applies beforeRun and beforeContext results to prompt execution", async () => {
+  const loop = new FakeAgentLoop("runner-lifecycle-transform-model", [
+    createUserMessage("previous"),
+  ]);
+  const runner = new TurnRunner({
+    loop,
+    readExecutionOutcome: () => ({ status: "succeeded" }),
+    lifecycleRunner: createLifecycleRunner({
+      beforeRun: [() => ({
+        systemPrompt: "before-run prompt",
+        messages: [createUserMessage("before-run message")]
+      })],
+      beforeContext: [({ messages, systemPrompt }) => ({
+        systemPrompt: `${systemPrompt} + before-context`,
+        messages: [
+          ...messages,
+          createUserMessage("before-context message")
+        ]
+      })]
+    }),
+    systemPrompt: "base prompt"
+  });
+
+  assert.deepEqual(await runner.run({ type: "prompt", text: "hello" }), { status: "succeeded" });
+
+  assert.equal(loop.promptSystemPrompts[0], "before-run prompt + before-context");
+  assert.deepEqual(loop.promptBatches[0]?.map(readTextFromMessage), [
+    "before-run message",
+    "hello",
+    "before-context message"
+  ]);
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    "previous",
+    "before-run message",
+    "hello",
+    "before-context message"
+  ]);
 });
 
 test("runtime session converts AgentLoop events without a real provider", () => {
@@ -605,14 +679,21 @@ function emptyConversation(modelId: string): ConversationRuntimeState {
 
 class FakeAgentLoop implements AgentLoop {
   readonly calls: string[] = [];
+  readonly promptBatches: AgentMessage[][] = [];
+  readonly promptSystemPrompts: string[] = [];
   private readonly listeners = new Set<(event: AgentEvent) => void>();
-  private readonly messages: AgentMessage[] = [];
+  private readonly messages: AgentMessage[];
 
-  constructor(private readonly modelId: string) {}
+  constructor(private readonly modelId: string, messages: AgentMessage[] = []) {
+    this.messages = [...messages];
+  }
 
-  async prompt(message: AgentMessage | AgentMessage[]): Promise<void> {
+  async prompt(message: AgentMessage | AgentMessage[], options: AgentLoopPromptOptions = {}): Promise<void> {
     this.calls.push("prompt");
-    this.messages.push(...(Array.isArray(message) ? message : [message]));
+    const batch = Array.isArray(message) ? message : [message];
+    this.promptBatches.push(batch);
+    this.promptSystemPrompts.push(options.systemPrompt ?? "");
+    this.messages.push(...batch);
   }
 
   async continue(): Promise<void> {
@@ -653,4 +734,12 @@ class FakeAgentLoop implements AgentLoop {
   emit(event: AgentEvent): void {
     for (const listener of this.listeners) listener(event);
   }
+}
+
+function readTextFromMessage(message: AgentMessage): string {
+  if (!("content" in message) || !Array.isArray(message.content)) return "";
+  return message.content.flatMap((block: unknown) => {
+    if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text") return [];
+    return "text" in block && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n");
 }
