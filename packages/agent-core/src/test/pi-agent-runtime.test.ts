@@ -268,21 +268,27 @@ test("TurnRunner applies beforeRun and beforeContext results to prompt execution
   const loop = new FakeAgentLoop("runner-lifecycle-transform-model", [
     createUserMessage("previous"),
   ]);
+  let afterRunMetadata: Record<string, unknown> | undefined;
   const runner = new TurnRunner({
     loop,
     readExecutionOutcome: () => ({ status: "succeeded" }),
     lifecycleRunner: createLifecycleRunner({
       beforeRun: [() => ({
         systemPrompt: "before-run prompt",
-        messages: [createUserMessage("before-run message")]
+        messages: [createUserMessage("before-run message")],
+        metadata: { mode: "review" }
       })],
       beforeContext: [({ messages, systemPrompt }) => ({
         systemPrompt: `${systemPrompt} + before-context`,
         messages: [
           ...messages,
           createUserMessage("before-context message")
-        ]
-      })]
+        ],
+        metadata: { contextReady: true }
+      })],
+      afterRun: [({ metadata }) => {
+        afterRunMetadata = metadata;
+      }]
     }),
     systemPrompt: "base prompt"
   });
@@ -301,9 +307,13 @@ test("TurnRunner applies beforeRun and beforeContext results to prompt execution
     "hello",
     "before-context message"
   ]);
+  assert.deepEqual(afterRunMetadata, {
+    mode: "review",
+    contextReady: true
+  });
 });
 
-test("runtime session converts AgentLoop events without a real provider", () => {
+test("runtime session converts AgentLoop events without a real provider", async () => {
   const loop = new FakeAgentLoop("adapter-events-model");
   const runtime = new AgentRuntimeSession("session-adapter-events", loop, emptyConversation("adapter-events-model"));
   const events: AgentRuntimeEvent[] = [];
@@ -314,6 +324,7 @@ test("runtime session converts AgentLoop events without a real provider", () => 
   loop.emit({ type: "message_start", message: userMessage } as AgentEvent);
   loop.emit({ type: "message_end", message: userMessage } as AgentEvent);
   loop.emit({ type: "agent_end" } as AgentEvent);
+  await runtime.execute({ type: "prompt", text: "flush events" });
 
   assert.deepEqual(events, [
     { type: "run_started", sessionId: "session-adapter-events" },
@@ -333,6 +344,70 @@ test("runtime session converts AgentLoop events without a real provider", () => 
     },
     { type: "run_finished", sessionId: "session-adapter-events" }
   ]);
+});
+
+test("runtime session consumes afterMessage replacement before publishing and exporting", async () => {
+  const loop = new FakeAgentLoop("adapter-after-message-model");
+  const runtime = new AgentRuntimeSession(
+    "session-after-message",
+    loop,
+    emptyConversation("adapter-after-message-model"),
+    0,
+    false,
+    createLifecycleRunner({
+      afterMessage: [({ message }) => ({
+        message: createUserMessage(`${readTextFromMessage(message)} redacted`)
+      })]
+    })
+  );
+  const events: AgentRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+
+  loop.appendAndEmitMessage(createUserMessage("secret"));
+  await runtime.execute({ type: "prompt", text: "flush events" });
+
+  assert.deepEqual(
+    events.filter((event) => event.type === "message_finished"),
+    [
+      {
+        type: "message_finished",
+        sessionId: "session-after-message",
+        messageId: "session-after-message:message:1",
+        role: "user",
+        text: "secret redacted"
+      }
+    ]
+  );
+  const state = runtime.exportState();
+  assert.ok(state.payload && typeof state.payload === "object" && "entries" in state.payload);
+  const payload = state.payload as { entries: Array<{ message: AgentMessage }> };
+  assert.equal(readTextFromMessage(payload.entries[0]?.message as AgentMessage), "secret redacted");
+});
+
+test("runtime session rejects afterMessage replacements that change role", async () => {
+  const loop = new FakeAgentLoop("adapter-after-message-role-model");
+  const runtime = new AgentRuntimeSession(
+    "session-after-message-role",
+    loop,
+    emptyConversation("adapter-after-message-role-model"),
+    0,
+    false,
+    createLifecycleRunner({
+      afterMessage: [() => ({
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "changed role" }]
+        } as unknown as AgentMessage
+      })]
+    })
+  );
+
+  loop.appendAndEmitMessage(createUserMessage("secret"));
+
+  await assert.rejects(
+    () => runtime.execute({ type: "prompt", text: "flush events" }),
+    /afterMessage cannot change message role/
+  );
 });
 
 test("EventHub converts assistant errors into failed runtime outcomes", () => {
@@ -733,6 +808,12 @@ class FakeAgentLoop implements AgentLoop {
 
   emit(event: AgentEvent): void {
     for (const listener of this.listeners) listener(event);
+  }
+
+  appendAndEmitMessage(message: AgentMessage): void {
+    this.messages.push(message);
+    this.emit({ type: "message_start", message } as AgentEvent);
+    this.emit({ type: "message_end", message } as AgentEvent);
   }
 }
 

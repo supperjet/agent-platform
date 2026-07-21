@@ -98,6 +98,51 @@ test("LifecycleRunner chains afterToolCall result transforms", async () => {
   assert.equal(readText(result?.result), "first:second");
 });
 
+test("LifecycleRunner shallow merges metadata across hook chains", async () => {
+  const runner = createLifecycleRunner({
+    beforeRun: [
+      () => ({ metadata: { command: "review", source: "first" } }),
+      ({ metadata }) => ({
+        metadata: {
+          source: "second",
+          seenCommand: metadata?.command,
+        },
+      }),
+    ],
+    beforeContext: [
+      ({ metadata }) => ({
+        metadata: {
+          context: true,
+          seenSource: metadata?.source,
+        },
+      }),
+    ],
+  });
+
+  const beforeRun = await runner.beforeRun({
+    command: { type: "prompt", text: "hello" },
+    systemPrompt: "base",
+  });
+  const beforeContext = await runner.beforeContext({
+    systemPrompt: "base",
+    messages: [],
+    ...(beforeRun?.metadata ? { metadata: beforeRun.metadata } : {}),
+  });
+
+  assert.deepEqual(beforeRun?.metadata, {
+    command: "review",
+    source: "second",
+    seenCommand: "review",
+  });
+  assert.deepEqual(beforeContext?.metadata, {
+    command: "review",
+    source: "second",
+    seenCommand: "review",
+    context: true,
+    seenSource: "second",
+  });
+});
+
 function createLifecycleTool(): AgentToolDefinition<
   typeof lifecycleToolParameters,
   Record<string, unknown>

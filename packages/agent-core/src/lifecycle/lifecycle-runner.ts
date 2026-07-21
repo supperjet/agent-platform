@@ -77,7 +77,7 @@ export function createLifecycleRunner(hooks: LifecycleHooks = {}): LifecycleRunn
           modified = true;
         }
         if (result.metadata) {
-          currentMetadata = result.metadata;
+          currentMetadata = mergeMetadata(currentMetadata, result.metadata);
           modified = true;
         }
       }
@@ -113,7 +113,7 @@ export function createLifecycleRunner(hooks: LifecycleHooks = {}): LifecycleRunn
           modified = true;
         }
         if (result.metadata) {
-          currentMetadata = result.metadata;
+          currentMetadata = mergeMetadata(currentMetadata, result.metadata);
           modified = true;
         }
       }
@@ -204,7 +204,7 @@ export function createLifecycleRunner(hooks: LifecycleHooks = {}): LifecycleRunn
           modified = true;
         }
         if (result.metadata) {
-          currentMetadata = result.metadata;
+          currentMetadata = mergeMetadata(currentMetadata, result.metadata);
           modified = true;
         }
       }
@@ -232,7 +232,7 @@ export function createLifecycleRunner(hooks: LifecycleHooks = {}): LifecycleRunn
           currentInstructions = result.instructions;
         }
         if (result.metadata) {
-          currentMetadata = result.metadata;
+          currentMetadata = mergeMetadata(currentMetadata, result.metadata);
         }
       }
 
@@ -265,5 +265,15 @@ function normalizeBeforeToolCallResult(result: BeforeToolCallHookResult): {
     hasArgs: Object.hasOwn(result, "args"),
     ...(Object.hasOwn(result, "args") ? { args: result.args } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
+  };
+}
+
+function mergeMetadata(
+  currentMetadata: Record<string, unknown> | undefined,
+  nextMetadata: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...currentMetadata,
+    ...nextMetadata,
   };
 }

@@ -1020,13 +1020,8 @@ packages/agent-core/src/prompt/prompt-template.ts
 
 当前状态：
 
-- `LifecycleHooks` 只是 no-op 占位：`{ name: "default" }`。
-- 还没有 hook 顺序、合并、短路、错误处理。
-
-未完成：
-
-- 实现内部 `LifecycleRunner`，先不公开插件 API。
-- 支持第一批内部 hook：
+- 已实现内部 `LifecycleRunner`，仍然只作为 agent-core 内部 seam，不公开插件 API。
+- 已支持第一批内部 hook：
   - `onInput`
   - `beforeRun`
   - `beforeContext`
@@ -1035,52 +1030,76 @@ packages/agent-core/src/prompt/prompt-template.ts
   - `afterMessage`
   - `beforeCompaction`
   - `afterRun`
-- 对齐 coding-agent extension runner 的核心语义：
-  - 可阻止事件。
-  - 可修改事件。
-  - 纯通知事件。
-  - hook 顺序稳定。
-  - hook 失败可诊断。
+- hook 按注册顺序串行执行。
+- transform 结果会传给下一个 hook。
+- `onInput` 的 `handled`、`beforeToolCall` 的 block、`beforeCompaction` 的 cancel 可以短路对应流程。
+- metadata 已改为浅合并，后写同名 key 覆盖前值，不同 key 保留。
+- `ToolRuntime` 已全量使用 lifecycle 的 `beforeToolCall` / `afterToolCall`，不再维护平行 tool hook 定义。
+- `afterMessage` 已做成可改写 hook：
+  - `AgentRuntimeSession` 会先消费 hook 返回的 replacement message。
+  - 公共 `message_finished` 事件和 exported conversation state 都使用改写后的 message。
+  - 第一版允许改写内容，但不允许改变 message role。
+- `afterRun` 已能接收本轮 `beforeRun` / `beforeContext` 合并后的 metadata。
+
+剩余增强项：
+
+- `beforeCompaction` 只有定义和 runner 方法，还没有真实调用点，等待 CompactionPolicy 接入。
+- `afterMessage` 的异步事件队列需要增加最大长度保护，避免极端情况下事件堆积。
+- hook error 需要更明确地转成 runtime failure 或 diagnostic event。
+- lifecycle metadata 目前仍是外部扩展约定，后续 slash command / skill 场景需要定义第一批推荐 key。
 
 验收：
 
-- hook 按注册顺序执行。
-- transform 结果会传给下一个 hook。
-- block/cancel 会短路。
-- lifecycle 不依赖 client/server/UI。
+- 已完成：hook 按注册顺序执行。
+- 已完成：transform 结果会传给下一个 hook。
+- 已完成：block/cancel 会短路对应流程。
+- 已完成：lifecycle 不依赖 client/server/UI。
+- 已完成：`afterMessage` 改写会影响公共事件和 conversation state。
+- 待增强：hook error 有统一诊断和 failure 归因。
+- 待增强：`beforeCompaction` 被真实 CompactionPolicy 消费。
 
 ### 15.4 InputProcessor / ContextAssembler
 
 当前状态：
 
 - `PromptAssembler` 已能构建静态 system prompt。
-- `TurnRunner` 直接把 command text 转成 user message。
-- 没有 per-turn context assembly。
-
-未完成：
-
-- 实现 `InputProcessor`：
-  - command normalize。
-  - prompt template expansion。
-  - skill command expansion。
-  - input hook 接入。
-- 实现 `ContextAssembler`：
-  - 从 `ConversationProjector` 获取当前消息路径。
-  - 注入当前 command message。
-  - 注入临时 context materials。
-  - 注入 compaction summary / branch summary。
-  - 执行 `beforeContext` hook。
-  - 输出当前 turn 的 systemPrompt/messages/tools/metadata。
-- 支持动态 system prompt：
+- 已实现 `InputProcessor v1`：
+  - 接入 `lifecycle.onInput`。
+  - 支持 `continue / transform / handled`。
+  - `handled` 会短路本轮，不进入模型。
+- 已实现 `ContextAssembler v1`：
+  - 把 prompt command 转成标准 user message。
+  - 执行 `lifecycle.beforeRun`。
+  - 组装 conversation 历史前缀 + 本轮 prompt messages。
+  - 执行 `lifecycle.beforeContext`。
+  - 输出本轮 `systemPrompt / promptMessages / messages / metadata`。
+  - 当前接线要求 `beforeContext.messages` 保留已有 conversation 前缀。
+- 已实现动态 system prompt v1：
   - base `PromptPlan` 不变。
-  - 每轮允许生成临时 override。
-  - turn 结束后恢复 base prompt。
+  - lifecycle 可以为单个 turn 返回临时 `systemPrompt` override。
+  - override 通过 `AgentLoopAdapter.prompt(..., { systemPrompt })` 只作用于当前 turn。
+- 已实现 `ContextBudget v1`：
+  - 只估算 message count 和字符数。
+  - 不做 token 估算、裁剪或压缩。
+- `TurnRunner` 已通过 `InputProcessor` 和 `ContextAssembler` 编排 prompt path，不再直接内联 onInput/beforeRun/beforeContext。
+
+剩余增强项：
+
+- `InputProcessor` 还没有正式 prompt template expansion。
+- `InputProcessor` 还没有正式 skill command expansion。
+- `InputProcessor` 还没有输出结构化 metadata；slash command / skill 场景仍需补协议。
+- `ContextAssembler` 当前直接接收 `conversationMessages`，还没有完整消费 `ConversationProjector`、resources、active tools、skills、memory、compaction summary。
+- `ContextBudget` 只做字符估算，不做 token budget、裁剪和 overflow 处理。
+- 临时 context materials、memory recall、skill 正文注入仍未实现。
 
 验收：
 
-- per-turn system prompt override 只影响当前 turn。
-- 临时 context 不写回 base prompt。
-- ContextAssembler 不负责加载资源，只消费 ResourceCatalog snapshot。
+- 已完成：per-turn system prompt override 只影响当前 turn。
+- 已完成：临时 context 不写回 base prompt。
+- 已完成：ContextAssembler 不负责加载资源。
+- 待增强：ContextAssembler 消费 ResourceCatalog snapshot 并决定每轮哪些资源进入上下文。
+- 待增强：prompt template / skill expansion 可独立测试。
+- 待增强：ContextBudget 参与裁剪或 CompactionPolicy 判断。
 
 ### 15.5 QueuePolicy / RetryPolicy / CompactionPolicy
 
