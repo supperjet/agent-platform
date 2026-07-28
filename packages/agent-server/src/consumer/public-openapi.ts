@@ -50,7 +50,7 @@ export function publicOpenApiDocument() {
         Session: {
           type: "object", required: ["sessionId", "status", "createdAt", "lastActiveAt", "messageCount", "modelId"],
           properties: {
-            sessionId: { type: "string" }, status: { type: "string", enum: ["idle", "running"] },
+            sessionId: { type: "string" }, status: { type: "string", enum: ["idle", "running", "failed", "commit_failed", "closed"] },
             createdAt: { type: "string", format: "date-time" }, lastActiveAt: { type: "string", format: "date-time" },
             messageCount: { type: "integer", minimum: 0 }, modelId: { type: "string" }
           }

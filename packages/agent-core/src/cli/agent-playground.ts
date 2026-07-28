@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
 import { createInterface, type Interface } from "node:readline/promises";
 import type { AgentModel, AgentRuntime } from "../contracts.js";
@@ -9,9 +9,14 @@ import {
   createDefaultToolPolicy,
   createLifecycleRunner,
   createLocalToolOperations,
+  InMemoryEventStore,
+  InMemoryRunStore,
+  LocalConversationStateStore,
   createToolRuntime,
   formatAgentDefinition,
+  projectToolCallRecordsFromEvents,
   PiAgentRuntimeFactory,
+  type AgentExecutionOutcome,
   type AgentRuntimeEvent,
   type LifecycleHooks,
 } from "../index.js";
@@ -22,10 +27,34 @@ import type {
 } from "../tools/policy/index.js";
 import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
 import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
+import { createUserMessage } from "../runtime/messages.js";
 
 type ApprovalMode = "ask" | "always" | "never";
 type EventMode = "off" | "on" | "json";
 type LifecycleMode = "off" | "on" | "json";
+
+const PLAYGROUND_COMMANDS = new Set([
+  "help",
+  "tools",
+  "policy",
+  "approve",
+  "events",
+  "eventlog",
+  "toolcalls",
+  "lifecycle",
+  "cwd",
+  "runs",
+  "state",
+  "save",
+  "delete",
+  "storage",
+  "context",
+  "snapshot",
+  "system",
+  "reset",
+  "exit",
+  "quit",
+]);
 
 export type AgentPlaygroundOptions = {
   model: AgentModel;
@@ -36,6 +65,7 @@ export type AgentPlaygroundOptions = {
   initialToolNames?: readonly string[];
   initialResourceNames?: readonly string[];
   requestTimeoutMs?: number;
+  stateFile?: string;
   json?: boolean;
 };
 
@@ -49,6 +79,19 @@ type PlaygroundState = {
   lifecycleMode: LifecycleMode;
   runtime: AgentRuntime;
   lastSystemPrompt: string;
+  localStore: LocalConversationStateStore;
+  stateFile: string;
+  runStore: InMemoryRunStore;
+  eventStore: InMemoryEventStore;
+  runRecorder: PlaygroundRunRecorder;
+  nextRunSequence: number;
+};
+
+type PlaygroundRunRecorder = {
+  activeRun?: {
+    runId: string;
+    nextEventSequence: number;
+  };
 };
 
 const BUILT_IN_TOOL_NAMES = ["read", "ls", "grep", "find", "write", "edit", "bash"];
@@ -67,8 +110,15 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
 
   let state: PlaygroundState | undefined;
 
-  const rebuildRuntime = (preserveState = true) => {
-    const previousState = preserveState ? state?.runtime.exportState() : undefined;
+  const stateFile = options.stateFile ?? resolvePlaygroundStateFile(options.initialCwd);
+  const localStore = new LocalConversationStateStore({ stateFile });
+  const runStore = new InMemoryRunStore();
+  const eventStore = new InMemoryEventStore();
+  const runRecorder: PlaygroundRunRecorder = {};
+  const restoredFile = await localStore.load();
+
+  const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
+    const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
     const next = createRuntimeState(options, rl, {
       cwd: state?.cwd ?? options.initialCwd,
       toolNames: state?.toolNames ?? [...(options.initialToolNames ?? BUILT_IN_TOOL_NAMES)],
@@ -77,27 +127,58 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       approvalMode: state?.approvalMode ?? "ask",
       eventMode: state?.eventMode ?? (options.json ? "json" : "on"),
       lifecycleMode: state?.lifecycleMode ?? "off",
+      localStore,
+      stateFile,
+      runStore: state?.runStore ?? runStore,
+      eventStore: state?.eventStore ?? eventStore,
+      runRecorder,
+      nextRunSequence: state?.nextRunSequence ?? 1,
     }, previousState);
     state = next;
   };
 
-  rebuildRuntime(false);
+  rebuildRuntime(false, restoredFile?.agentState);
   printIntro(state);
+  if (restoredFile) {
+    stdout.write(`restored: ${stateFile}\n`);
+  } else {
+    stdout.write(`state file: ${stateFile}\n`);
+  }
 
+  const lines = rl[Symbol.asyncIterator]();
   while (state) {
-    const line = (await rl.question("agent> ")).trim();
+    stdout.write("agent> ");
+    const input = await lines.next();
+    if (input.done) break;
+    const line = input.value.trim();
     if (!line) continue;
     if (line === "/exit" || line === "/quit") break;
 
-    if (line.startsWith("/")) {
+    if (isPlaygroundCommand(line)) {
       const shouldContinue = await handleCommand(line, state, rebuildRuntime);
       if (!shouldContinue) break;
       continue;
     }
 
-    const outcome = await state.runtime.execute({ type: "prompt", text: line });
-    if (outcome.status === "failed") {
+    const run = await startPlaygroundRun(state, "prompt");
+    let outcome: AgentExecutionOutcome;
+    try {
+      outcome = await state.runtime.execute({ type: "prompt", text: line });
+    } catch (error) {
+      outcome = {
+        status: "failed",
+        errorCode: "PLAYGROUND_RUN_FAILED",
+        message: readErrorMessage(error),
+      };
+    }
+    await finishPlaygroundRun(state, run.runId, outcome);
+    if (outcome.status === "failed" || outcome.status === "commit_failed") {
       stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
+    } else if (outcome.status === "aborted") {
+      await savePlaygroundState(state);
+      stderr.write("Run aborted.\n");
+    } else {
+      await savePlaygroundState(state);
     }
     stdout.write("\n");
   }
@@ -146,7 +227,10 @@ function createRuntimeState(
     ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
   });
   const runtime = factory.create("agent-core-playground", conversationState);
-  runtime.subscribe((event) => printRuntimeEvent(event, config.eventMode));
+  runtime.subscribe((event) => {
+    recordRuntimeEvent(config, event);
+    printRuntimeEvent(event, config.eventMode);
+  });
 
   return {
     ...config,
@@ -159,21 +243,43 @@ function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
   if (mode === "off") return {};
 
   return {
-    onInput: [({ command }) => {
-      printLifecycleEvent(mode, "onInput", { commandType: command.type });
+    onInput: [({ command, metadata }) => {
+      printLifecycleEvent(mode, "onInput", {
+        commandType: command.type,
+        ...(metadata ? { metadata } : {}),
+      });
       return { action: "continue" };
     }],
-    beforeRun: [({ command, systemPrompt }) => {
+    beforeRun: [({ command, systemPrompt, metadata }) => {
       printLifecycleEvent(mode, "beforeRun", {
         commandType: command.type,
         systemPromptLength: systemPrompt.length,
+        ...(metadata ? { metadata } : {}),
       });
+      if (readSlashCommand(metadata) !== "review") return;
+      return {
+        systemPrompt: [
+          systemPrompt,
+          "",
+          "本轮 slash command: review。",
+          "请以代码审查口吻回答，优先指出 bug、风险、行为回归和缺失测试。",
+        ].join("\n"),
+      };
     }],
-    beforeContext: [({ messages, systemPrompt }) => {
+    beforeContext: [({ messages, systemPrompt, metadata }) => {
       printLifecycleEvent(mode, "beforeContext", {
         messageCount: messages.length,
         systemPromptLength: systemPrompt.length,
+        ...(metadata ? { metadata } : {}),
       });
+      if (readSlashCommand(metadata) !== "review") return;
+      const target = readRawArgs(metadata) ?? "当前输入";
+      return {
+        messages: [
+          ...messages,
+          createUserMessage(`临时上下文：请 review ${target}，并用 findings-first 的结构输出。`),
+        ],
+      };
     }],
     beforeToolCall: [({ tool, toolCallId, args }) => {
       printLifecycleEvent(mode, "beforeToolCall", {
@@ -200,10 +306,31 @@ function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
         willRetry,
       });
     }],
-    afterRun: [({ status }) => {
-      printLifecycleEvent(mode, "afterRun", { status });
+    afterRun: [({ status, metadata }) => {
+      printLifecycleEvent(mode, "afterRun", {
+        status,
+        ...(metadata ? { metadata } : {}),
+      });
     }],
   };
+}
+
+function isPlaygroundCommand(line: string) {
+  if (!line.startsWith("/")) return false;
+  const command = line.slice(1).split(/\s+/, 1)[0] ?? "";
+  return PLAYGROUND_COMMANDS.has(command);
+}
+
+function readSlashCommand(metadata: Record<string, unknown> | undefined): string | undefined {
+  return typeof metadata?.slashCommand === "string"
+    ? metadata.slashCommand
+    : undefined;
+}
+
+function readRawArgs(metadata: Record<string, unknown> | undefined): string | undefined {
+  const args = metadata?.args;
+  if (!args || typeof args !== "object" || !("raw" in args)) return undefined;
+  return typeof args.raw === "string" ? args.raw : undefined;
 }
 
 function createApprovalHandler(
@@ -260,6 +387,14 @@ async function handleCommand(
     stdout.write(`events: ${state.eventMode}\n`);
     return true;
   }
+  if (command === "eventlog") {
+    await printStoredEvents(state, value);
+    return true;
+  }
+  if (command === "toolcalls") {
+    await printStoredToolCalls(state, value);
+    return true;
+  }
   if (command === "lifecycle") {
     state.lifecycleMode = parseLifecycleMode(value);
     rebuildRuntime(true);
@@ -276,8 +411,30 @@ async function handleCommand(
     stdout.write(`cwd: ${state.cwd}\n`);
     return true;
   }
+  if (command === "runs") {
+    await printStoredRuns(state);
+    return true;
+  }
   if (command === "state") {
     stdout.write(`${JSON.stringify(state.runtime.exportState(), null, 2)}\n`);
+    return true;
+  }
+  if (command === "save") {
+    const file = await savePlaygroundState(state);
+    stdout.write(`saved: ${file}\n`);
+    return true;
+  }
+  if (command === "delete") {
+    const deleted = await state.localStore.delete();
+    stdout.write(deleted ? `deleted: ${state.stateFile}\n` : `not found: ${state.stateFile}\n`);
+    return true;
+  }
+  if (command === "storage") {
+    stdout.write(`state file: ${state.stateFile}\n`);
+    return true;
+  }
+  if (command === "context") {
+    stdout.write(`${JSON.stringify(state.runtime.inspectContext() ?? null, null, 2)}\n`);
     return true;
   }
   if (command === "snapshot") {
@@ -319,6 +476,124 @@ function createSystemPromptPreview(
   return assembly.systemPrompt;
 }
 
+async function startPlaygroundRun(
+  state: PlaygroundState,
+  commandType: "prompt",
+) {
+  const sequence = state.nextRunSequence;
+  state.nextRunSequence += 1;
+  const runId = `playground-run-${sequence}`;
+  const commandId = `playground-command-${sequence}`;
+  state.runRecorder.activeRun = {
+    runId,
+    nextEventSequence: 1,
+  };
+  return state.runStore.start({
+    runId,
+    commandId,
+    sessionId: "agent-core-playground",
+    commandType,
+    startedAt: new Date().toISOString(),
+  });
+}
+
+async function finishPlaygroundRun(
+  state: PlaygroundState,
+  runId: string,
+  outcome: AgentExecutionOutcome,
+) {
+  const status = outcome.status;
+  try {
+    await state.runStore.finish(runId, {
+      status,
+      outcome,
+      endedAt: new Date().toISOString(),
+    });
+  } finally {
+    delete state.runRecorder.activeRun;
+  }
+}
+
+function recordRuntimeEvent(
+  config: Pick<PlaygroundState, "eventStore" | "runRecorder">,
+  event: AgentRuntimeEvent,
+) {
+  const activeRun = config.runRecorder.activeRun;
+  if (!activeRun) return;
+  const sequence = activeRun.nextEventSequence;
+  activeRun.nextEventSequence += 1;
+  void config.eventStore.append({
+    eventId: `${activeRun.runId}:event:${sequence}`,
+    runId: activeRun.runId,
+    sessionId: event.sessionId,
+    sequence,
+    type: event.type,
+    payload: event,
+    retention: isRequiredRuntimeEvent(event) ? "required" : "diagnostic",
+    createdAt: new Date().toISOString(),
+  }).catch((error: unknown) => {
+    stderr.write(`event store append failed: ${readErrorMessage(error)}\n`);
+  });
+}
+
+async function printStoredRuns(state: PlaygroundState) {
+  const runs = await state.runStore.listBySession("agent-core-playground");
+  if (runs.length === 0) {
+    stdout.write("runs: (none)\n");
+    return;
+  }
+  stdout.write(`${JSON.stringify(runs, null, 2)}\n`);
+}
+
+async function printStoredEvents(state: PlaygroundState, runId: string) {
+  const events = runId
+    ? await state.eventStore.listByRun(runId)
+    : await state.eventStore.listBySession("agent-core-playground");
+  if (events.length === 0) {
+    stdout.write("events: (none)\n");
+    return;
+  }
+  stdout.write(`${JSON.stringify(events, null, 2)}\n`);
+}
+
+async function printStoredToolCalls(state: PlaygroundState, runId: string) {
+  const events = runId
+    ? await state.eventStore.listByRun(runId)
+    : await state.eventStore.listBySession("agent-core-playground");
+  const records = projectToolCallRecordsFromEvents(events);
+  if (records.length === 0) {
+    stdout.write("tool calls: (none)\n");
+    return;
+  }
+  stdout.write(`${JSON.stringify(records, null, 2)}\n`);
+}
+
+async function savePlaygroundState(state: PlaygroundState) {
+  await state.localStore.save({
+    sessionId: "agent-core-playground",
+    agentState: state.runtime.exportState(),
+    sessionInfo: {
+      cwd: state.cwd,
+      modelId: state.runtime.snapshot().modelId
+    }
+  });
+  return state.stateFile;
+}
+
+function isRequiredRuntimeEvent(event: AgentRuntimeEvent) {
+  return event.type === "run_started"
+    || event.type === "run_finished"
+    || event.type === "run_aborted"
+    || event.type === "run_failed"
+    || event.type === "message_finished"
+    || event.type === "tool_started"
+    || event.type === "tool_finished";
+}
+
+function resolvePlaygroundStateFile(cwd: string) {
+  return join(resolve(cwd), ".agent-platform", "playground", "sessions", "agent-core-playground", "state.json");
+}
+
 function printRuntimeEvent(event: AgentRuntimeEvent, mode: EventMode) {
   if (mode === "off") {
     if (event.type === "message_delta" && event.channel === "text") stdout.write(event.delta);
@@ -344,7 +619,7 @@ function printToolRuntimeEvent(event: ToolRuntimeEvent, mode: EventMode) {
 function printLifecycleEvent(mode: LifecycleMode, hook: string, data: Record<string, unknown>) {
   if (mode === "off") return;
   if (mode === "json") {
-    stderr.write(`${JSON.stringify({ source: "lifecycle", hook, data })}\n`);
+    stderr.write(`${JSON.stringify({ source: "lifecycle", hook, data }, null, 2)}\n`);
     return;
   }
   const details = Object.entries(data)
@@ -387,6 +662,10 @@ function formatLifecycleValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function readErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function printIntro(state: PlaygroundState | undefined) {
   stdout.write("Agent Runtime Playground\n");
   stdout.write("Type /help for commands, /exit to quit.\n");
@@ -406,14 +685,22 @@ function printHelp() {
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.
+  /eventlog [runId]      Print stored EventStore records.
+  /toolcalls [runId]     Print projected tool call recovery records.
   /lifecycle on|off|json Toggle LifecycleRunner hook logging.
   /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
+  /runs                  Print stored RunStore records.
   /state                 Print exported conversation state.
+  /save                  Save conversation state to local storage.
+  /delete                Delete the saved local conversation state.
+  /storage               Print the local state file path.
+  /context               Print the last assembled prompt context.
   /snapshot              Print runtime snapshot.
   /system                Print current assembled system prompt.
   /reset                 Reset conversation session.
   /exit                  Quit.
 
-Any non-command line is sent as a prompt to the current AgentRuntime.
+Any non-command line, plus slash-prefixed lines that are not playground
+commands, is sent as a prompt to the current AgentRuntime.
 `);
 }

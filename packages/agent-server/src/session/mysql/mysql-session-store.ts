@@ -70,7 +70,7 @@ export class MySqlSessionStore extends SessionStore {
         status = 'running', executing_command_id = ?, lease_owner = ?, lease_until_ms = ?,
         version = version + 1, last_active_at_ms = ?, updated_at_ms = ?
       WHERE session_id = ?
-        AND status <> 'closed'
+        AND status NOT IN ('closed', 'commit_failed')
         AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
       [
         lease.commandId,

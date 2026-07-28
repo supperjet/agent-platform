@@ -6,34 +6,8 @@ import type { ConversationEntry } from "../conversation/conversation-entry.js";
 import { ConversationStore } from "../conversation/conversation-store.js";
 import {
   exportConversationEntriesState,
-  exportConversationState,
   restoreConversationMessages
 } from "../conversation/conversation-state.js";
-
-test("restores legacy message payloads as conversation entries", () => {
-  const messages: AgentMessage[] = [
-    { role: "user", content: "first" } as unknown as AgentMessage,
-    { role: "assistant", content: "second" } as unknown as AgentMessage
-  ];
-  const state = exportConversationState("model-a", messages);
-  const store = new ConversationStore();
-
-  const snapshot = store.restore({
-    state,
-    modelId: "model-a",
-    definitionId: "definition-a"
-  });
-
-  assert.deepEqual(snapshot.messages.map((message) => message.role), ["user", "assistant"]);
-  assert.deepEqual(snapshot.entries.map((entry) => entry.id), ["message:1", "message:2"]);
-  assert.equal(snapshot.entries[1]?.parentId, "message:1");
-  assert.equal(snapshot.leafId, "message:2");
-  assert.deepEqual(snapshot.compatibility, {
-    modelId: "model-a",
-    definitionId: "definition-a"
-  });
-  assert.notEqual(snapshot.messages, messages);
-});
 
 test("restores entry payloads through the current leaf path", () => {
   const entries: ConversationEntry[] = [
@@ -49,6 +23,62 @@ test("restores entry payloads through the current leaf path", () => {
   assert.deepEqual(snapshot.entries.map((entry) => entry.id), ["root", "main", "branch"]);
   assert.deepEqual(snapshot.messages.map(readTestContent), ["root prompt", "branch answer"]);
   assert.equal(snapshot.leafId, "branch");
+});
+
+test("restores v2 entries while projecting only message entries", () => {
+  const entries: ConversationEntry[] = [
+    createMessageEntry("root", null, "user", "root prompt"),
+    {
+      kind: "compaction",
+      id: "summary",
+      parentId: "root",
+      createdAt: "2026-07-24T00:00:01.000Z",
+      payload: {
+        summary: "Earlier work was summarized.",
+        sourceEntryIds: ["root"]
+      }
+    },
+    createMessageEntry("answer", "summary", "assistant", "answer after summary"),
+    {
+      kind: "custom_state",
+      id: "planner-state",
+      parentId: "answer",
+      createdAt: "2026-07-24T00:00:03.000Z",
+      payload: {
+        namespace: "planner",
+        state: { phase: "D.1" }
+      }
+    },
+    {
+      kind: "session_info",
+      id: "session-info",
+      parentId: "planner-state",
+      createdAt: "2026-07-24T00:00:04.000Z",
+      payload: {
+        cwd: "/workspace/project",
+        definitionId: "restore-agent"
+      }
+    },
+    {
+      kind: "future_entry",
+      id: "future",
+      parentId: "session-info",
+      createdAt: "2026-07-24T00:00:05.000Z",
+      payload: { value: true }
+    }
+  ];
+  const state = exportConversationEntriesState("model-a", entries, "future");
+  const store = new ConversationStore();
+
+  const snapshot = store.restore({ state, modelId: "model-a" });
+
+  assert.equal(state.schemaVersion, 2);
+  assert.deepEqual(
+    snapshot.entries.map((entry) => entry.id),
+    ["root", "summary", "answer", "planner-state", "session-info", "future"]
+  );
+  assert.deepEqual(snapshot.messages.map(readTestContent), ["root prompt", "answer after summary"]);
+  assert.equal(snapshot.leafId, "future");
 });
 
 test("restores empty state to an empty conversation snapshot", () => {
@@ -76,7 +106,7 @@ test("keeps restoreConversationMessages compatible with new entry payloads", () 
 
 test("rejects conversation state restored with a different model", () => {
   const store = new ConversationStore();
-  const state = exportConversationState("model-a", []);
+  const state = exportConversationEntriesState("model-a", [], null);
 
   assert.throws(
     () => store.restore({ state, modelId: "model-b" }),
@@ -87,7 +117,7 @@ test("rejects conversation state restored with a different model", () => {
 test("rejects malformed entry payloads", () => {
   const store = new ConversationStore();
   const state: AgentConversationState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     modelId: "model-a",
     payload: {
       entries: [
@@ -111,11 +141,13 @@ function createMessageEntry(
   content: string
 ): ConversationEntry {
   return {
-    type: "message",
+    kind: "message",
     id,
     parentId,
-    timestamp: "1970-01-01T00:00:00.000Z",
-    message: { role, content } as unknown as AgentMessage
+    createdAt: "2026-07-24T00:00:00.000Z",
+    payload: {
+      message: { role, content } as unknown as AgentMessage
+    }
   };
 }
 

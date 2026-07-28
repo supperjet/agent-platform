@@ -40,19 +40,39 @@ export function createLifecycleRunner(hooks: LifecycleHooks = {}): LifecycleRunn
   return {
     async onInput(input: InputHookInput): Promise<InputHookResult> {
       let currentCommand: AgentRuntimeCommand = input.command;
+      let currentMetadata = input.metadata;
       let transformed = false;
 
       for (const hook of hooks.onInput ?? []) {
-        const result = await hook({ command: currentCommand });
-        if (!result || result.action === "continue") continue;
-        if (result.action === "handled") return result;
+        const result = await hook({
+          command: currentCommand,
+          ...(currentMetadata ? { metadata: currentMetadata } : {}),
+        });
+        if (!result) continue;
+        if (result.metadata) {
+          currentMetadata = mergeMetadata(currentMetadata, result.metadata);
+          transformed = true;
+        }
+        if (result.action === "continue") continue;
+        if (result.action === "handled") {
+          return currentMetadata ? { ...result, metadata: currentMetadata } : result;
+        }
         currentCommand = result.command;
         transformed = true;
       }
 
-      return transformed
-        ? { action: "transform", command: currentCommand }
-        : { action: "continue" };
+      if (!transformed) return { action: "continue" };
+      if (currentCommand === input.command) {
+        return {
+          action: "continue",
+          ...(currentMetadata ? { metadata: currentMetadata } : {}),
+        };
+      }
+      return {
+        action: "transform",
+        command: currentCommand,
+        ...(currentMetadata ? { metadata: currentMetadata } : {}),
+      };
     },
 
     async beforeRun(input: BeforeRunHookInput): Promise<BeforeRunHookResult> {

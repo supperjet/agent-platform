@@ -22,6 +22,15 @@ test("ContextAssembler creates a prompt turn from a prompt command", async () =>
     messageCount: 1,
     estimatedCharacters: 5,
   });
+  assert.deepEqual(context.metadata.diagnostics, {
+    budget: {
+      messageCount: 1,
+      estimatedCharacters: 5,
+    },
+    injectedSources: [],
+    persistentPromptMessageCount: 1,
+    transientPromptMessageCount: 0,
+  });
 });
 
 test("ContextAssembler applies beforeRun and beforeContext to one turn", async () => {
@@ -56,6 +65,8 @@ test("ContextAssembler applies beforeRun and beforeContext to one turn", async (
     "hello",
     "context from beforeRun",
   ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [1]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [0, 2]);
   assert.deepEqual(context.messages.map(readTextFromMessage), [
     "previous",
     "run context",
@@ -67,6 +78,68 @@ test("ContextAssembler applies beforeRun and beforeContext to one turn", async (
     run: true,
     context: true,
   });
+  assert.deepEqual(context.metadata.diagnostics.injectedSources, [
+    "lifecycle.beforeRun.systemPrompt",
+    "lifecycle.beforeRun.messages",
+    "lifecycle.beforeRun.metadata",
+    "lifecycle.beforeContext.systemPrompt",
+    "lifecycle.beforeContext.messages",
+    "lifecycle.beforeContext.metadata",
+  ]);
+});
+
+test("ContextAssembler passes input metadata through lifecycle hooks", async () => {
+  const seenMetadata: Array<Record<string, unknown> | undefined> = [];
+  const assembler = new ContextAssembler({
+    lifecycleRunner: createLifecycleRunner({
+      beforeRun: [({ metadata }) => {
+        seenMetadata.push(metadata);
+        return { metadata: { selectedTemplate: "review-template" } };
+      }],
+      beforeContext: [({ metadata, messages }) => {
+        seenMetadata.push(metadata);
+        return {
+          messages: [
+            ...messages,
+            createUserMessage(`active slash:${String(metadata?.slashCommand)}`),
+          ],
+        };
+      }],
+    }),
+  });
+
+  const context = await assembler.assemble({
+    command: { type: "prompt", text: "/review src/runtime.ts" },
+    baseSystemPrompt: "base prompt",
+    conversationMessages: [],
+    metadata: {
+      slashCommand: "review",
+      args: { raw: "src/runtime.ts" },
+    },
+  });
+
+  assert.deepEqual(seenMetadata, [
+    {
+      slashCommand: "review",
+      args: { raw: "src/runtime.ts" },
+    },
+    {
+      slashCommand: "review",
+      selectedTemplate: "review-template",
+      args: { raw: "src/runtime.ts" },
+    },
+  ]);
+  assert.deepEqual(context.metadata.hooks, {
+    slashCommand: "review",
+    selectedTemplate: "review-template",
+    args: { raw: "src/runtime.ts" },
+  });
+  assert.deepEqual(context.promptMessages.map(readTextFromMessage), [
+    "/review src/runtime.ts",
+    "active slash:review",
+  ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [0]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [1]);
 });
 
 test("ContextAssembler rejects beforeContext replacing the conversation prefix", async () => {

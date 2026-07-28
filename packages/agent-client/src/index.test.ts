@@ -55,6 +55,42 @@ test("a failed run stops loading and removes its empty assistant placeholder", (
   assert.equal(failed.events.at(-1)?.type, "run_failed");
 });
 
+test("an aborted run stops loading without dropping transcript messages", () => {
+  const initial = createAgentConsoleState("session-1");
+  const running = reduceConsoleEvent(initial, { type: "run_started", sessionId: "session-1" });
+  const started = reduceConsoleEvent(running, {
+    type: "message_started",
+    sessionId: "session-1",
+    messageId: "message-1",
+    role: "assistant",
+    text: "partial"
+  });
+  const aborted = reduceConsoleEvent(started, {
+    type: "run_aborted",
+    sessionId: "session-1"
+  });
+
+  assert.equal(aborted.isRunning, false);
+  assert.equal(aborted.messages.length, 1);
+  assert.equal(aborted.events.at(-1)?.type, "run_aborted");
+});
+
+test("transient context message events stay in history but not the transcript", () => {
+  const initial = createAgentConsoleState("session-1");
+  const next = reduceConsoleEvent(initial, {
+    type: "message_started",
+    sessionId: "session-1",
+    messageId: "message-transient",
+    role: "user",
+    text: "temporary context",
+    messageScope: "transient"
+  });
+
+  assert.equal(next.events.length, 1);
+  assert.equal(next.messages.length, 0);
+  assert.equal(next.events[0]?.type, "message_started");
+});
+
 test("default browser fetch keeps the global receiver", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = function (this: unknown) {

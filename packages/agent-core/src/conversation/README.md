@@ -1,14 +1,19 @@
-# Conversation State v1
+# Conversation State v2
 
-`agent-core` owns the shape and validation of versioned conversation state. Hosts such as `agent-server` persist `AgentConversationState` as opaque JSON and pass it back into `AgentRuntimeFactory.create(sessionId, state?)` on restore.
+`agent-core` owns the shape and validation of versioned conversation state. Hosts such as `agent-server` persist `AgentConversationState` JSON and pass it back into `AgentRuntimeFactory.create(sessionId, state?)` on restore.
+
+中文说明：conversation 模块只负责“可恢复对话状态”的结构、校验和投影，不负责
+数据库、文件或 session lease。宿主保存的是 v2 entry graph；runtime 恢复时，
+conversation 模块会从 `leafId` 回溯 active path，并且只把 `kind: "message"` 的
+entry 投影成模型可见 messages。
 
 ## Persisted Contract
 
-New exports use an entry graph payload:
+Exports use an entry graph payload:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "modelId": "provider:model",
   "payload": {
     "entries": [],
@@ -17,12 +22,15 @@ New exports use an entry graph payload:
 }
 ```
 
-- `schemaVersion`: state format version. v1 is the only supported version.
+- `schemaVersion`: state format version. v2 is the only supported version.
 - `modelId`: runtime model identity. Restore rejects state saved for a different model.
-- `payload.entries`: append-only conversation entries. v1 entries are message entries with `id`, `parentId`, `timestamp`, and `message`.
+- `payload.entries`: append-only conversation entries. v2 entries use `id`, `parentId`, `kind`, `createdAt`, and `payload`.
 - `payload.leafId`: the active branch leaf. Projection follows `parentId` links from this entry back to the root to rebuild the active `messages` path.
 
-`payload.messages` is legacy input only. `restoreConversationSnapshot` still accepts it and converts messages into a linear entry graph, but new exports must use `payload.entries` plus `payload.leafId`.
+`payload.messages` and legacy `type/timestamp/message` entries are not supported.
+
+中文说明：旧的 `{ messages }` payload 已经被移除。所有持久化状态都必须进入
+`payload.entries`，并使用 `kind/createdAt/payload` 的 v2 entry 结构。
 
 ## Runtime Semantics
 
@@ -34,15 +42,15 @@ When a prompt appends new messages, each new entry points to the previous active
 
 `RuntimeAssembler` is a composition layer, not the schema owner. It resolves the runtime model and Agent definition, passes the saved `AgentConversationState` to `ConversationStore.restore(...)`, and returns the restored conversation snapshot to the runtime.
 
-Do not parse `payload.entries`, read `payload.leafId`, or mutate graph structure in `RuntimeAssembler`. Conversation validation, legacy message conversion, graph projection, and compatibility metadata belong in the `conversation/` module.
+Do not parse `payload.entries`, read `payload.leafId`, or mutate graph structure in `RuntimeAssembler`. Conversation validation, graph projection, and compatibility metadata belong in the `conversation/` module.
 
 ## Compatibility Metadata
 
-`definitionId` is compatibility metadata produced during restore by the runtime assembly path. It is not currently persisted in the v1 payload. Use it to describe which Agent definition restored the state, not to identify graph entries.
+`definitionId` is compatibility metadata produced during restore by the runtime assembly path. It is not currently persisted in the v2 payload. Use it to describe which Agent definition restored the state, not to identify graph entries.
 
 ## Server Boundary
 
-`agent-server` must not parse or mutate the conversation graph in v1. It owns session metadata, execution leases, command dispatch, and durable storage; `agent-core` owns conversation validation, projection, export, and restore.
+`agent-server` must not mutate the conversation graph. It owns session metadata, execution leases, command dispatch, and durable storage; `agent-core` owns conversation validation, projection, export, and restore.
 
 The expected server behavior is:
 

@@ -43,4 +43,6 @@ export type AgentLoop = {
   subscribe(listener: (event: AgentEvent) => void): () => void;
   /** 读取当前最小快照。 */
   snapshot(): AgentLoopSnapshot;
+  /** 用调用方整理后的消息历史替换底层 loop history。 */
+  replaceMessages(messages: readonly AgentMessage[]): void;
 };

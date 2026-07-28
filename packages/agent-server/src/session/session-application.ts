@@ -57,7 +57,7 @@ export class InProcessSessionApplication extends SessionApplication {
     const snapshot = await this.sessionQuery.snapshot(sessionId);
     return snapshot ? {
       sessionId: snapshot.sessionId,
-      status: snapshot.status === "running" ? "running" : "idle",
+      status: snapshot.status,
       createdAt: new Date(snapshot.createdAt).toISOString(),
       lastActiveAt: new Date(snapshot.lastActiveAt).toISOString(),
       messageCount: snapshot.messageCount,

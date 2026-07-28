@@ -71,6 +71,25 @@ test("accepts a command without waiting for agent execution", async () => {
   assert.equal((await application.getCommand("command-1"))?.status, "succeeded");
 });
 
+test("marks a command failed when Session state commit fails", async () => {
+  const sessions = new RecordingSessionManager(undefined, {
+    status: "commit_failed",
+    errorCode: "STATE_COMMIT_FAILED",
+    message: "State commit failed."
+  });
+  const { application } = createTestApplication(sessions);
+
+  await application.submitCommand({
+    sessionId: "session-1",
+    commandId: "command-1",
+    type: "prompt",
+    text: "hello"
+  });
+  await application.close();
+
+  assert.equal((await application.getCommand("command-1"))?.status, "failed");
+});
+
 test("retries an identical command without executing it twice", async () => {
   const sessions = new RecordingSessionManager();
   const { application } = createTestApplication(sessions);
@@ -228,7 +247,10 @@ class RecordingSessionManager extends SessionManager {
   readonly calls: Array<{ type: string; sessionId: string; text?: string }> = [];
   private readonly existingSessions = new Set<string>();
 
-  constructor(private readonly promptGate?: Promise<void>) {
+  constructor(
+    private readonly promptGate?: Promise<void>,
+    private readonly promptOutcome: CommandReceipt["outcome"] = { status: "succeeded" }
+  ) {
     super();
   }
 
@@ -236,7 +258,7 @@ class RecordingSessionManager extends SessionManager {
     this.calls.push({ type: "prompt", sessionId, text });
     this.existingSessions.add(sessionId);
     await this.promptGate;
-    return this.receipt("prompt", sessionId, true);
+    return this.receipt("prompt", sessionId, true, this.promptOutcome);
   }
 
   steer(sessionId: string, text: string) {
@@ -265,13 +287,18 @@ class RecordingSessionManager extends SessionManager {
     } : undefined;
   }
 
-  private receipt(action: CommandReceipt["action"], sessionId: string, accepted: boolean): CommandReceipt {
+  private receipt(
+    action: CommandReceipt["action"],
+    sessionId: string,
+    accepted: boolean,
+    outcome: CommandReceipt["outcome"] = { status: "succeeded" }
+  ): CommandReceipt {
     return {
       accepted,
       sessionId,
       action,
       outcome: accepted
-        ? { status: "succeeded" }
+        ? outcome
         : { status: "failed", errorCode: "SESSION_NOT_FOUND", message: "Session not found." }
     };
   }

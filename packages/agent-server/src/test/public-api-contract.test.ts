@@ -129,6 +129,32 @@ test("v1 publishes session discovery, validation errors, and its OpenAPI surface
   }
 });
 
+test("v1 exposes unresolved Session commit failures through session discovery", async () => {
+  const sessions = new RecordingSessionManager(undefined, undefined, "commit_failed");
+  const events = new SilentEventBus();
+  const { application, publicEvents } = createSessionApplication(sessions, events);
+  const app = createAgentFastifyServer({
+    application,
+    publicEvents
+  });
+
+  try {
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions/session-1/commands",
+      payload: { commandId: "command-1", type: "prompt", text: "hello" }
+    });
+    await application.close();
+
+    const session = await app.inject({ method: "GET", url: "/api/v1/sessions/session-1" });
+
+    assert.equal(session.statusCode, 200);
+    assert.equal(session.json().status, "commit_failed");
+  } finally {
+    await app.close();
+  }
+});
+
 test("v1 reports a command id reused with different content as a conflict", async () => {
   const sessions = new RecordingSessionManager();
   const events = new SilentEventBus();
@@ -222,7 +248,8 @@ class RecordingSessionManager extends SessionManager {
 
   constructor(
     private readonly events?: SessionEventBus,
-    private readonly promptGate?: Promise<void>
+    private readonly promptGate?: Promise<void>,
+    private readonly snapshotStatus: SessionSnapshot["status"] = "idle"
   ) {
     super();
   }
@@ -253,7 +280,7 @@ class RecordingSessionManager extends SessionManager {
   async snapshot(sessionId: string): Promise<SessionSnapshot | undefined> {
     return this.existingSessions.has(sessionId) ? {
       sessionId,
-      status: "idle",
+      status: this.snapshotStatus,
       createdAt: 0,
       lastActiveAt: 0,
       messageCount: 0,

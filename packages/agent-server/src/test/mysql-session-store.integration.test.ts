@@ -16,9 +16,18 @@ test("persists Agent state and rejects a stale Session version", {
     status: "idle",
     modelId: "deepseek-chat",
     agentState: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       modelId: "deepseek-chat",
-      payload: { messages: [{ role: "user", content: "你好，MySQL" }] }
+      payload: {
+        entries: [{
+          kind: "message",
+          id: "message:1",
+          parentId: null,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          payload: { message: { role: "user", content: "你好，MySQL" } }
+        }],
+        leafId: "message:1"
+      }
     },
     messageCount: 1,
     version: 0,

@@ -38,6 +38,7 @@ type CliOptions = {
   printState: boolean;
   printTools: boolean;
   printSystemPrompt: boolean;
+  playgroundStateFile?: string;
   requestTimeoutMs: number | undefined;
   resourceNames: string[];
   toolArgs: unknown;
@@ -89,6 +90,7 @@ async function main() {
         ...(options.toolNames.length > 0 ? { initialToolNames: options.toolNames } : {}),
         ...(options.resourceNames.length > 0 ? { initialResourceNames: options.resourceNames } : {}),
         ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+        ...(options.playgroundStateFile === undefined ? {} : { stateFile: options.playgroundStateFile }),
         json: options.json
       });
       return;
@@ -158,9 +160,11 @@ async function main() {
     if (options.printState) {
       stdout.write(`${JSON.stringify(runtime.exportState())}\n`);
     }
-    if (outcome.status === "failed") {
+    if (outcome.status === "failed" || outcome.status === "commit_failed") {
       stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
       process.exitCode = 1;
+    } else if (outcome.status === "aborted") {
+      stderr.write("Run aborted.\n");
     }
   } finally {
     registration?.unregister();
@@ -228,6 +232,10 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     }
     if (arg === "--agent-playground") {
       options.agentPlayground = true;
+      continue;
+    }
+    if (arg === "--playground-state-file") {
+      options.playgroundStateFile = resolve(requireValue(args, ++index, "--playground-state-file"));
       continue;
     }
     if (arg === "--call-tool") {
@@ -465,6 +473,8 @@ Options:
   --faux                    Use a local faux provider instead of DeepSeek.
   --faux-response <text>    Response text for --faux mode.
   --agent-playground        Start an interactive AgentRuntime playground.
+  --playground-state-file <path>
+                            Override the playground local state file.
   --call-tool <name>        Execute a registered tool directly without calling the model.
   --tool-args <json>        JSON arguments for --call-tool. Defaults to {}.
   --tool-cwd <path>         Working directory for built-in ToolOperations. Defaults to process cwd.

@@ -68,3 +68,55 @@ test("InputProcessor short-circuits handled input", async () => {
   );
   assert.deepEqual(calls, ["first"]);
 });
+
+test("InputProcessor parses prompt slash command metadata without changing text", async () => {
+  const processor = new InputProcessor();
+
+  assert.deepEqual(
+    await processor.process({
+      command: { type: "prompt", text: "/review src/runtime.ts --strict" },
+    }),
+    {
+      status: "ready",
+      command: { type: "prompt", text: "/review src/runtime.ts --strict" },
+      metadata: {
+        slashCommand: "review",
+        args: {
+          raw: "src/runtime.ts --strict",
+        },
+      },
+    },
+  );
+});
+
+test("InputProcessor merges onInput metadata with parsed slash metadata", async () => {
+  const processor = new InputProcessor({
+    lifecycleRunner: createLifecycleRunner({
+      onInput: [() => ({
+        action: "continue",
+        metadata: {
+          inputMode: "command",
+          selectedTemplate: "review-template",
+        },
+      })],
+    }),
+  });
+
+  assert.deepEqual(
+    await processor.process({
+      command: { type: "prompt", text: "/review src/runtime.ts" },
+    }),
+    {
+      status: "ready",
+      command: { type: "prompt", text: "/review src/runtime.ts" },
+      metadata: {
+        slashCommand: "review",
+        inputMode: "command",
+        selectedTemplate: "review-template",
+        args: {
+          raw: "src/runtime.ts",
+        },
+      },
+    },
+  );
+});

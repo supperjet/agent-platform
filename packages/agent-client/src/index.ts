@@ -1,8 +1,12 @@
 export type AgentEvent = (
-  | { type: "run_started" | "run_finished"; sessionId: string }
+  | { type: "run_started" | "run_finished" | "run_aborted"; sessionId: string }
   | { type: "run_failed"; sessionId: string; errorCode: "AGENT_RUN_FAILED"; message: string }
-  | { type: "message_started" | "message_finished"; sessionId: string; messageId: string; role: "user" | "assistant"; text: string }
+  | { type: "message_started" | "message_finished"; sessionId: string; messageId: string; role: "user" | "assistant"; text: string; messageScope?: "persistent" | "transient" | "unknown" }
   | { type: "assistant_delta"; sessionId: string; messageId: string; delta: string }
+  | { type: "tool_policy_checked"; sessionId: string; toolCallId: string; toolName: string; decision: string; reason?: string }
+  | { type: "tool_approval_requested"; sessionId: string; toolCallId: string; toolName: string; title: string; message: string; risk?: "low" | "medium" | "high"; reason: string }
+  | { type: "tool_approval_approved"; sessionId: string; toolCallId: string; toolName: string }
+  | { type: "tool_approval_denied"; sessionId: string; toolCallId: string; toolName: string; reason: string }
   | { type: "tool_started"; sessionId: string; toolCallId: string; toolName: string; args: unknown }
   | { type: "tool_progress"; sessionId: string; toolCallId: string; text: string }
   | { type: "tool_finished"; sessionId: string; toolCallId: string; isError: boolean; text: string; sourceIds: string[] }
@@ -53,7 +57,12 @@ export function reduceConsoleEvent(state: AgentConsoleState, input: AgentEvent):
   const event: AgentEvent = { ...input, receivedAt };
   const events = [...state.events, event];
 
-  if (event.type === "run_started" || event.type === "run_finished" || event.type === "run_failed") {
+  if (
+    event.type === "run_started" ||
+    event.type === "run_finished" ||
+    event.type === "run_aborted" ||
+    event.type === "run_failed"
+  ) {
     return {
       ...state,
       events,
@@ -65,6 +74,9 @@ export function reduceConsoleEvent(state: AgentConsoleState, input: AgentEvent):
   }
 
   if (event.type === "message_started") {
+    if (event.messageScope === "transient") {
+      return { ...state, events };
+    }
     return {
       ...state,
       events,
@@ -89,6 +101,9 @@ export function reduceConsoleEvent(state: AgentConsoleState, input: AgentEvent):
   }
 
   if (event.type === "message_finished") {
+    if (event.messageScope === "transient") {
+      return { ...state, events };
+    }
     return {
       ...state,
       events,

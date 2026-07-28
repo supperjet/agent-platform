@@ -3,6 +3,7 @@ import {
   type CommandRecord,
   type CommandRepository,
   type CommandType,
+  type CommandStatus,
   type ExecutionLogger,
   type SessionManager
 } from "./contracts.js";
@@ -51,15 +52,17 @@ export class SessionCommandRunner extends CommandRunner {
       await this.commandRepository.save({
         ...command,
         accepted: receipt.accepted,
-        status: receipt.accepted && receipt.outcome.status === "succeeded" ? "succeeded" : "failed",
+        status: receipt.accepted ? commandStatusFromOutcome(receipt.outcome.status) : "failed",
         updatedAt: this.now()
       });
       if (receipt.accepted && receipt.outcome.status === "succeeded") {
         this.logger.log("info", commandLog(command, "command.execution.succeeded", "succeeded"));
+      } else if (receipt.accepted && receipt.outcome.status === "aborted") {
+        this.logger.log("info", commandLog(command, "command.execution.cancelled", "cancelled"));
       } else {
         this.logger.log("error", {
           ...commandLog(command, "command.execution.failed", "failed"),
-          ...(receipt.outcome.status === "failed" ? {
+          ...(receipt.outcome.status === "failed" || receipt.outcome.status === "commit_failed" ? {
             errorCode: receipt.outcome.errorCode,
             errorMessage: receipt.outcome.message
           } : {})
@@ -74,6 +77,14 @@ export class SessionCommandRunner extends CommandRunner {
       throw error;
     }
   }
+}
+
+function commandStatusFromOutcome(
+  status: "succeeded" | "failed" | "aborted" | "commit_failed",
+): CommandStatus {
+  if (status === "aborted") return "cancelled";
+  if (status === "commit_failed") return "failed";
+  return status;
 }
 
 const NOOP_EXECUTION_LOGGER: ExecutionLogger = { log() {} };

@@ -34,13 +34,14 @@ export type InputHook = (
 
 export type InputHookInput = {
   command: AgentRuntimeCommand;
+  metadata?: Record<string, unknown>;
 };
 
 export type InputHookResult =
   | void
-  | { action: "continue" }
-  | { action: "transform"; command: AgentRuntimeCommand }
-  | { action: "handled" };
+  | { action: "continue"; metadata?: Record<string, unknown> }
+  | { action: "transform"; command: AgentRuntimeCommand; metadata?: Record<string, unknown> }
+  | { action: "handled"; metadata?: Record<string, unknown> };
 
 /**
  * 输入已经确定、准备启动本轮 agent loop 前执行。

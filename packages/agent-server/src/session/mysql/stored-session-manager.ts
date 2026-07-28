@@ -90,6 +90,7 @@ export class StoredSessionManager extends SessionManager {
     if (!prepared) {
       return this.failure("prompt", sessionId, "SESSION_CLOSED", `Session "${sessionId}" is closed.`);
     }
+    if ("receipt" in prepared) return prepared.receipt;
 
     const { runtime, record } = prepared;
     this.activeSessions.set(sessionId, { runtime });
@@ -119,12 +120,13 @@ export class StoredSessionManager extends SessionManager {
     }
     if (!await renewal.stop()) throw leaseLost(sessionId, commandId);
     const snapshot = runtime.snapshot();
+    const committedState = runtime.exportState();
     const completedAt = this.now();
-    const next: SessionRecord = outcome.status === "succeeded"
+    const next: SessionRecord = outcome.status === "succeeded" || outcome.status === "aborted"
       ? {
         ...withoutExecutionLease(record),
         status: "idle",
-        agentState: runtime.exportState(),
+        agentState: committedState,
         messageCount: snapshot.messageCount,
         version: record.version + 1,
         lastActiveAt: completedAt,
@@ -137,7 +139,15 @@ export class StoredSessionManager extends SessionManager {
         lastActiveAt: completedAt,
         updatedAt: completedAt
       };
-    await this.saveNext(next, record.version);
+    if (!await this.trySaveNext(next, record.version)) {
+      const commitFailed = createCommitFailedOutcome(sessionId, next.version);
+      await this.trySaveCommitFailed({
+        ...next,
+        status: "commit_failed",
+        updatedAt: this.now()
+      }, record.version);
+      return this.receipt("prompt", sessionId, true, commitFailed);
+    }
     return this.receipt("prompt", sessionId, true, outcome);
   }
 
@@ -168,6 +178,16 @@ export class StoredSessionManager extends SessionManager {
   private async preparePrompt(sessionId: string, commandId: string) {
     const existing = await this.sessions.find(sessionId);
     if (existing?.status === "closed") return undefined;
+    if (existing?.status === "commit_failed") {
+      return {
+        receipt: this.failure(
+          "prompt",
+          sessionId,
+          "SESSION_COMMIT_FAILED",
+          `Session "${sessionId}" has an unresolved state commit failure.`
+        )
+      };
+    }
     if (existing) return this.acquireExisting(existing.sessionId, commandId);
 
     // 不存在则创建
@@ -191,6 +211,16 @@ export class StoredSessionManager extends SessionManager {
     const creation = await this.sessions.createIfAbsent(candidate);
     if (creation.created) return { runtime, record: creation.session };
     if (creation.session.status === "closed") return undefined;
+    if (creation.session.status === "commit_failed") {
+      return {
+        receipt: this.failure(
+          "prompt",
+          sessionId,
+          "SESSION_COMMIT_FAILED",
+          `Session "${sessionId}" has an unresolved state commit failure.`
+        )
+      };
+    }
     return this.acquireExisting(creation.session.sessionId, commandId);
   }
 
@@ -258,6 +288,23 @@ export class StoredSessionManager extends SessionManager {
       throw new Error(
         `Session "${session.sessionId}" changed while saving version ${session.version}.`
       );
+    }
+  }
+
+  private async trySaveNext(session: SessionRecord, expectedVersion: number) {
+    try {
+      return await this.sessions.save(session, expectedVersion);
+    } catch {
+      return false;
+    }
+  }
+
+  private async trySaveCommitFailed(session: SessionRecord, expectedVersion: number) {
+    try {
+      await this.sessions.save(session, expectedVersion);
+    } catch {
+      // 如果持久化介质完全不可用，连 commit_failed marker 也可能写不进去。
+      // 调用方仍会收到 commit_failed outcome；后续 D.5 Run/EventStore 再补诊断记录。
     }
   }
 
@@ -331,4 +378,12 @@ function startLeaseRenewal(
 
 function leaseLost(sessionId: string, commandId: string) {
   return new Error(`Session "${sessionId}" lease was lost while executing Command "${commandId}".`);
+}
+
+function createCommitFailedOutcome(sessionId: string, version: number) {
+  return {
+    status: "commit_failed" as const,
+    errorCode: "STATE_COMMIT_FAILED",
+    message: `Session "${sessionId}" state commit failed while saving version ${version}.`
+  };
 }

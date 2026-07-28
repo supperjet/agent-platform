@@ -13,6 +13,8 @@ export type ContextAssemblerInput = {
   baseSystemPrompt: string;
   /** 当前 conversation 投影出来的历史消息前缀。 */
   conversationMessages: readonly AgentMessage[];
+  /** InputProcessor 输出的 per-turn scratch metadata，不默认进入 conversation state。 */
+  metadata?: Record<string, unknown>;
 };
 
 export type TurnContextMetadata = {
@@ -20,6 +22,15 @@ export type TurnContextMetadata = {
   hooks?: Record<string, unknown>;
   /** 第一版上下文预算估算结果，只用于观测，不做裁剪。 */
   budget: ContextBudgetEstimate;
+  /** 面向诊断和观测的上下文装配摘要。 */
+  diagnostics: ContextAssemblyDiagnostics;
+};
+
+export type ContextAssemblyDiagnostics = {
+  budget: ContextBudgetEstimate;
+  injectedSources: string[];
+  persistentPromptMessageCount: number;
+  transientPromptMessageCount: number;
 };
 
 export type TurnContext = {
@@ -27,6 +38,12 @@ export type TurnContext = {
   systemPrompt: string;
   /** 当前 turn 需要追加给 AgentLoop 的消息，不包含已有 conversation 前缀。 */
   promptMessages: AgentMessage[];
+  /** `promptMessages` 中应写回 conversation history 的消息下标。 */
+  persistentPromptMessageIndexes: number[];
+  /** `promptMessages` 中只给本轮模型调用使用、回合结束后应移除的消息下标。 */
+  transientPromptMessageIndexes: number[];
+  /** 当前 turn 组装时已有 conversation 前缀长度。 */
+  conversationMessageCount: number;
   /** 包含 conversation 前缀和 promptMessages 的完整上下文视图。 */
   messages: readonly AgentMessage[];
   metadata: TurnContextMetadata;
@@ -63,20 +80,26 @@ export class ContextAssembler {
     const userMessage = createUserMessage(input.command.text);
     let systemPrompt = input.baseSystemPrompt;
     let promptMessages: AgentMessage[] = [userMessage];
-    let hookMetadata: Record<string, unknown> | undefined;
+    let persistentPromptMessages: AgentMessage[] = [userMessage];
+    let hookMetadata: Record<string, unknown> | undefined = input.metadata;
+    const injectedSources: string[] = input.metadata ? ["input.metadata"] : [];
 
     const beforeRunResult = await this.options.lifecycleRunner?.beforeRun({
       command: input.command,
       systemPrompt,
+      ...(hookMetadata ? { metadata: hookMetadata } : {}),
     });
     if (beforeRunResult?.systemPrompt !== undefined) {
       systemPrompt = beforeRunResult.systemPrompt;
+      injectedSources.push("lifecycle.beforeRun.systemPrompt");
     }
     if (beforeRunResult?.messages?.length) {
       promptMessages = [...beforeRunResult.messages, userMessage];
+      injectedSources.push("lifecycle.beforeRun.messages");
     }
     if (beforeRunResult?.metadata) {
       hookMetadata = mergeMetadata(hookMetadata, beforeRunResult.metadata);
+      injectedSources.push("lifecycle.beforeRun.metadata");
     }
 
     let contextMessages: readonly AgentMessage[] = [
@@ -90,22 +113,47 @@ export class ContextAssembler {
     });
     if (beforeContextResult?.systemPrompt !== undefined) {
       systemPrompt = beforeContextResult.systemPrompt;
+      injectedSources.push("lifecycle.beforeContext.systemPrompt");
     }
     if (beforeContextResult?.messages !== undefined) {
       contextMessages = beforeContextResult.messages;
       promptMessages = projectPromptMessages(input.conversationMessages, contextMessages);
+      persistentPromptMessages = projectPersistentPromptMessages(
+        input.conversationMessages,
+        contextMessages,
+        persistentPromptMessages,
+      );
+      injectedSources.push("lifecycle.beforeContext.messages");
     }
     if (beforeContextResult?.metadata) {
       hookMetadata = mergeMetadata(hookMetadata, beforeContextResult.metadata);
+      injectedSources.push("lifecycle.beforeContext.metadata");
     }
+    const budget = this.contextBudget.estimate(contextMessages);
+    const persistentPromptMessageIndexes = findPromptMessageIndexes(
+      promptMessages,
+      persistentPromptMessages,
+    );
+    const transientPromptMessageIndexes = promptMessages
+      .map((_, index) => index)
+      .filter((index) => !persistentPromptMessageIndexes.includes(index));
 
     return {
       systemPrompt,
       promptMessages,
+      persistentPromptMessageIndexes,
+      transientPromptMessageIndexes,
+      conversationMessageCount: input.conversationMessages.length,
       messages: contextMessages,
       metadata: {
         ...(hookMetadata ? { hooks: hookMetadata } : {}),
-        budget: this.contextBudget.estimate(contextMessages),
+        budget,
+        diagnostics: {
+          budget,
+          injectedSources,
+          persistentPromptMessageCount: persistentPromptMessageIndexes.length,
+          transientPromptMessageCount: transientPromptMessageIndexes.length,
+        },
       },
     };
   }
@@ -126,6 +174,37 @@ function projectPromptMessages(
   }
 
   return nextContextMessages.slice(conversationMessages.length);
+}
+
+function projectPersistentPromptMessages(
+  conversationMessages: readonly AgentMessage[],
+  nextContextMessages: readonly AgentMessage[],
+  previousPersistentMessages: readonly AgentMessage[],
+): AgentMessage[] {
+  const nextPromptMessages = projectPromptMessages(
+    conversationMessages,
+    nextContextMessages,
+  );
+  const nextPromptMessageSet = new Set(nextPromptMessages);
+  for (const message of previousPersistentMessages) {
+    if (!nextPromptMessageSet.has(message)) {
+      throw new Error("beforeContext must preserve existing persistent prompt messages in the current ContextAssembler wiring.");
+    }
+  }
+  return [...previousPersistentMessages];
+}
+
+function findPromptMessageIndexes(
+  promptMessages: readonly AgentMessage[],
+  persistentPromptMessages: readonly AgentMessage[],
+): number[] {
+  const remaining = [...persistentPromptMessages];
+  return promptMessages.flatMap((message, index) => {
+    const persistentIndex = remaining.indexOf(message);
+    if (persistentIndex < 0) return [];
+    remaining.splice(persistentIndex, 1);
+    return [index];
+  });
 }
 
 function mergeMetadata(

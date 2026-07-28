@@ -27,13 +27,13 @@ test("creates a Session and persists Agent state after a successful prompt", asy
   assert.equal(stored?.status, "idle");
   assert.equal(stored?.version, 1);
   assert.equal(stored?.messageCount, 1);
-  assert.deepEqual(stored?.agentState?.payload, { prompts: ["hello"] });
+  assert.deepEqual(readGraphPrompts(stored?.agentState), ["hello"]);
 });
 
 test("restores persisted Agent state before executing the next prompt", async () => {
   const original = sessionRecord({
     version: 5,
-    agentState: state({ prompts: ["first"] }),
+    agentState: graphState("session-1", ["first"]),
     messageCount: 1
   });
   const sessions = new MemorySessionStore(original);
@@ -43,9 +43,7 @@ test("restores persisted Agent state before executing the next prompt", async ()
   await manager.prompt("session-1", "second", "command-2");
 
   assert.deepEqual(factory.restoredStates, [original.agentState]);
-  assert.deepEqual((await sessions.find("session-1"))?.agentState?.payload, {
-    prompts: ["first", "second"]
-  });
+  assert.deepEqual(readGraphPrompts((await sessions.find("session-1"))?.agentState), ["first", "second"]);
   assert.equal((await sessions.find("session-1"))?.version, 7);
 });
 
@@ -74,7 +72,7 @@ test("persists entry graph Agent state across a restored prompt", async () => {
 });
 
 test("preserves the previous Agent state when execution fails", async () => {
-  const originalState = state({ prompts: ["safe"] });
+  const originalState = graphState("session-1", ["safe"]);
   const sessions = new MemorySessionStore(sessionRecord({ agentState: originalState }));
   const manager = new StoredSessionManager(
     new FakeRuntimeFactory({ status: "failed", errorCode: "MODEL_FAILED", message: "failed" }),
@@ -91,8 +89,89 @@ test("preserves the previous Agent state when execution fails", async () => {
   assert.deepEqual(stored?.agentState, originalState);
 });
 
+test("persists Agent state when prompt execution is aborted", async () => {
+  const originalState = graphState("session-1", ["safe"]);
+  const sessions = new MemorySessionStore(sessionRecord({
+    version: 3,
+    agentState: originalState,
+    messageCount: 1
+  }));
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "aborted" }),
+    sessions,
+    { now: () => 4_250 }
+  );
+
+  const receipt = await manager.prompt("session-1", "cancelled prompt", "command-aborted");
+  const stored = await sessions.find("session-1");
+
+  assert.equal(receipt.outcome.status, "aborted");
+  assert.equal(stored?.status, "idle");
+  assert.equal(stored?.executingCommandId, undefined);
+  assert.equal(stored?.messageCount, 2);
+  assert.deepEqual(readGraphPrompts(stored?.agentState), ["safe", "cancelled prompt"]);
+});
+
+test("returns commit failure when completed state cannot be saved", async () => {
+  const originalState = graphState("session-1", ["safe"]);
+  const sessions = new MemorySessionStore(sessionRecord({
+    version: 3,
+    agentState: originalState,
+    messageCount: 1
+  }));
+  sessions.failNextSaveForExpectedVersion(4);
+  const manager = new StoredSessionManager(
+    new FakeRuntimeFactory({ status: "succeeded" }),
+    sessions,
+    { now: () => 4_375 }
+  );
+
+  const receipt = await manager.prompt("session-1", "not committed", "command-commit-failed");
+  const stored = await sessions.find("session-1");
+
+  assert.deepEqual(receipt.outcome, {
+    status: "commit_failed",
+    errorCode: "STATE_COMMIT_FAILED",
+    message: "Session \"session-1\" state commit failed while saving version 5."
+  });
+  assert.equal(stored?.status, "commit_failed");
+  assert.equal(stored?.executingCommandId, undefined);
+  assert.equal(stored?.messageCount, 2);
+  assert.deepEqual(readGraphPrompts(stored?.agentState), ["safe", "not committed"]);
+});
+
+test("refuses to continue a Session with an unresolved commit failure", async () => {
+  const originalState = graphState("session-1", ["needs repair"]);
+  const sessions = new MemorySessionStore(sessionRecord({
+    status: "commit_failed",
+    version: 7,
+    agentState: originalState,
+    messageCount: 1
+  }));
+  const factory = new FakeRuntimeFactory();
+  const manager = new StoredSessionManager(factory, sessions, { now: () => 4_400 });
+
+  const receipt = await manager.prompt("session-1", "should wait", "command-after-commit-failed");
+  const stored = await sessions.find("session-1");
+
+  assert.deepEqual(receipt, {
+    accepted: false,
+    sessionId: "session-1",
+    action: "prompt",
+    outcome: {
+      status: "failed",
+      errorCode: "SESSION_COMMIT_FAILED",
+      message: "Session \"session-1\" has an unresolved state commit failure."
+    }
+  });
+  assert.deepEqual(factory.restoredStates, []);
+  assert.equal(stored?.status, "commit_failed");
+  assert.equal(stored?.version, 7);
+  assert.deepEqual(stored?.agentState, originalState);
+});
+
 test("marks the Session failed while preserving state when the runtime throws", async () => {
-  const originalState = state({ prompts: ["safe"] });
+  const originalState = graphState("session-1", ["safe"]);
   const sessions = new MemorySessionStore(sessionRecord({ agentState: originalState }));
   const manager = new StoredSessionManager(
     new FakeRuntimeFactory(new Error("runtime crashed")),
@@ -270,8 +349,8 @@ test("fences an old Worker after its lease expires and another Worker takes over
   await replacement.prompt("session-1", "new", "command-new");
   releaseFirst();
 
-  await assert.rejects(oldExecution, /changed while saving version/);
-  assert.deepEqual((await sessions.find("session-1"))?.agentState?.payload, { prompts: ["new"] });
+  assert.equal((await oldExecution).outcome.status, "commit_failed");
+  assert.deepEqual(readGraphPrompts((await sessions.find("session-1"))?.agentState), ["new"]);
 });
 
 test("reads Session snapshots from durable storage", async () => {
@@ -293,6 +372,7 @@ test("reads Session snapshots from durable storage", async () => {
 
 class MemorySessionStore extends SessionStore {
   private readonly records = new Map<string, SessionRecord>();
+  private readonly failingSaveExpectedVersions = new Map<number, number>();
 
   constructor(initial?: SessionRecord) {
     super();
@@ -316,6 +396,7 @@ class MemorySessionStore extends SessionStore {
     if (
       !current
       || current.status === "closed"
+      || current.status === "commit_failed"
       || (current.leaseUntil !== undefined && current.leaseUntil > lease.now)
     ) {
       return undefined;
@@ -354,10 +435,22 @@ class MemorySessionStore extends SessionStore {
   }
 
   async save(session: SessionRecord, expectedVersion: number) {
+    const remainingFailures = this.failingSaveExpectedVersions.get(expectedVersion) ?? 0;
+    if (remainingFailures > 0) {
+      this.failingSaveExpectedVersions.set(expectedVersion, remainingFailures - 1);
+      return false;
+    }
     const current = this.records.get(session.sessionId);
     if (!current || current.version !== expectedVersion) return false;
     this.records.set(session.sessionId, structuredClone(session));
     return true;
+  }
+
+  failNextSaveForExpectedVersion(expectedVersion: number) {
+    this.failingSaveExpectedVersions.set(
+      expectedVersion,
+      (this.failingSaveExpectedVersions.get(expectedVersion) ?? 0) + 1
+    );
   }
 }
 
@@ -400,8 +493,7 @@ class FakeRuntime extends AgentRuntime {
     private readonly promptGate?: Promise<void>
   ) {
     super();
-    const payload = restoredState?.payload as { prompts?: string[] } | undefined;
-    this.prompts = [...(payload?.prompts ?? [])];
+    this.prompts = readGraphPrompts(restoredState);
   }
 
   async execute(command: AgentRuntimeCommand) {
@@ -425,7 +517,7 @@ class FakeRuntime extends AgentRuntime {
   }
 
   exportState() {
-    return state({ prompts: [...this.prompts] });
+    return graphState("session-1", [...this.prompts]);
   }
 
   subscribe() {
@@ -434,11 +526,13 @@ class FakeRuntime extends AgentRuntime {
 }
 
 type GraphEntry = {
-  type: "message";
+  kind: "message";
   id: string;
   parentId: string | null;
-  timestamp: string;
-  message: { role: "user"; text: string };
+  createdAt: string;
+  payload: {
+    message: { role: "user"; text: string };
+  };
 };
 
 type GraphPayload = {
@@ -476,11 +570,13 @@ class GraphRuntime extends AgentRuntime {
     if (command.type === "prompt") {
       const id = `${this.sessionId}:entry:${this.entries.length + 1}`;
       this.entries.push({
-        type: "message",
+        kind: "message",
         id,
         parentId: this.leafId,
-        timestamp: new Date(0).toISOString(),
-        message: { role: "user", text: command.text }
+        createdAt: new Date(0).toISOString(),
+        payload: {
+          message: { role: "user", text: command.text }
+        }
       });
       this.leafId = id;
     }
@@ -490,7 +586,7 @@ class GraphRuntime extends AgentRuntime {
   snapshot() {
     return {
       messageCount: this.entries.length,
-      transcriptRoles: this.entries.map((entry) => entry.message.role),
+      transcriptRoles: this.entries.map((entry) => entry.payload.message.role),
       isRunning: false,
       modelId: "test-model"
     };
@@ -508,20 +604,18 @@ class GraphRuntime extends AgentRuntime {
   }
 }
 
-function state(payload: unknown): AgentConversationState {
-  return { schemaVersion: 1, modelId: "test-model", payload };
-}
-
 function graphState(sessionId: string, prompts: string[]): AgentConversationState {
   let parentId: string | null = null;
   const entries = prompts.map((prompt, index) => {
     const id = `${sessionId}:entry:${index + 1}`;
     const entry: GraphEntry = {
-      type: "message",
+      kind: "message",
       id,
       parentId,
-      timestamp: new Date(0).toISOString(),
-      message: { role: "user", text: prompt }
+      createdAt: new Date(0).toISOString(),
+      payload: {
+        message: { role: "user", text: prompt }
+      }
     };
     parentId = id;
     return entry;
@@ -533,10 +627,20 @@ function graphState(sessionId: string, prompts: string[]): AgentConversationStat
 }
 
 function graphStateFromPayload(payload: GraphPayload): AgentConversationState {
-  return state({
-    entries: structuredClone(payload.entries),
-    leafId: payload.leafId
-  });
+  return {
+    schemaVersion: 2,
+    modelId: "test-model",
+    payload: {
+      entries: structuredClone(payload.entries),
+      leafId: payload.leafId
+    }
+  };
+}
+
+function readGraphPrompts(state: AgentConversationState | undefined): string[] {
+  if (!state) return [];
+  const payload = assertGraphPayload(state.payload);
+  return payload.entries.map((entry) => entry.payload.message.text);
 }
 
 function assertGraphPayload(payload: unknown): GraphPayload {
@@ -556,7 +660,7 @@ function sessionRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     sessionId: "session-1",
     status: "idle",
     modelId: "test-model",
-    agentState: state({ prompts: [] }),
+    agentState: graphState("session-1", []),
     messageCount: 0,
     version: 0,
     createdAt: 1_000,

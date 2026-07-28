@@ -17,7 +17,7 @@ export type PublicCommandReceipt = {
 
 export type PublicSession = {
   sessionId: string; // 会话ID
-  status: "idle" | "running"; // 状态
+  status: "idle" | "running" | "failed" | "commit_failed" | "closed"; // 状态
   createdAt: string; // 创建时间
   lastActiveAt: string; // 最后活跃时间
   messageCount: number; // 消息数量

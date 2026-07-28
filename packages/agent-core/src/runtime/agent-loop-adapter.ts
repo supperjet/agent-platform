@@ -105,4 +105,8 @@ export class AgentLoopAdapter implements AgentLoop {
       modelId: this.agent.state.model.id
     };
   }
+
+  replaceMessages(messages: readonly AgentMessage[]): void {
+    this.agent.state.messages = [...messages];
+  }
 }

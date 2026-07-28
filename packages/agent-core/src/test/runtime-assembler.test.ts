@@ -3,7 +3,7 @@ import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { registerFauxProvider, Type } from "@earendil-works/pi-ai";
 import type { ConversationEntry } from "../conversation/conversation-entry.js";
-import { exportConversationEntriesState, exportConversationState } from "../conversation/conversation-state.js";
+import { exportConversationEntriesState } from "../conversation/conversation-state.js";
 import { formatAgentDefinition } from "../definition/agent-definition.js";
 import {
   ResourceCatalog,
@@ -51,58 +51,12 @@ test("assembles static instructions into a prompt plan", () => {
   }
 });
 
-test("restores conversation messages through the conversation store", () => {
-  const registration = registerFauxProvider({ provider: "runtime-assembler-restore-test" });
-  const messages: AgentMessage[] = [
-    { role: "user", content: "first" } as AgentMessage
-  ];
-  const state = exportConversationState(registration.getModel().id, messages);
-  const assembler = new RuntimeAssembler();
-
-  try {
-    const assembly = assembler.assemble({
-      sessionId: "session-assembly-restore",
-      definition: formatAgentDefinition({
-        id: "assembly-restore-agent",
-        model: registration.getModel(),
-        instructions: ["Answer briefly."],
-        toolNames: []
-      }),
-      state,
-      resolveApiKey: () => "core-only-key"
-    });
-
-    assert.deepEqual(assembly.messages.map((message) => message.role), ["user"]);
-    assert.notEqual(assembly.messages, messages);
-  } finally {
-    registration.unregister();
-  }
-});
-
-test("restores v1 entry graph state through the conversation store", () => {
+test("restores entry graph state through the conversation store", () => {
   const registration = registerFauxProvider({ provider: "runtime-assembler-graph-restore-test" });
   const entries: ConversationEntry[] = [
-    {
-      type: "message",
-      id: "root",
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00.000Z",
-      message: { role: "user", content: "root path" } as AgentMessage
-    },
-    {
-      type: "message",
-      id: "main",
-      parentId: "root",
-      timestamp: "2026-01-01T00:00:01.000Z",
-      message: { role: "assistant", content: "main answer" } as unknown as AgentMessage
-    },
-    {
-      type: "message",
-      id: "branch",
-      parentId: "root",
-      timestamp: "2026-01-01T00:00:02.000Z",
-      message: { role: "assistant", content: "branch answer" } as unknown as AgentMessage
-    }
+    createMessageEntry("root", null, "user", "root path"),
+    createMessageEntry("main", "root", "assistant", "main answer"),
+    createMessageEntry("branch", "root", "assistant", "branch answer")
   ];
   const state = exportConversationEntriesState(registration.getModel().id, entries, "branch");
   const assembler = new RuntimeAssembler();
@@ -524,6 +478,23 @@ function createInspectTool(): AgentToolDefinition<typeof inspectParameters> {
 
 function readTextContent(message: AgentMessage): string {
   return "content" in message && typeof message.content === "string" ? message.content : "";
+}
+
+function createMessageEntry(
+  id: string,
+  parentId: string | null,
+  role: "user" | "assistant",
+  content: string
+): ConversationEntry {
+  return {
+    kind: "message",
+    id,
+    parentId,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    payload: {
+      message: { role, content } as unknown as AgentMessage
+    }
+  };
 }
 
 function readToolResultText(result: unknown): string {

@@ -2,6 +2,7 @@ import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import {
   type AgentExecutionOutcome,
+  type AgentRuntimeMessageScope,
   type AgentRuntimeEvent,
   type AgentRuntimeEventListener,
 } from "../contracts.js";
@@ -27,6 +28,10 @@ export type EventHubOptions = {
   preferToolRuntimeEvents?: boolean;
 };
 
+export type AgentEventPublishOptions = {
+  messageScope?: AgentRuntimeMessageScope;
+};
+
 /**
  * 事件中心。
  *
@@ -49,8 +54,8 @@ export class EventHub {
   }
 
   /** 接收底层 AgentLoop 事件，并转换成公共 runtime 事件。 */
-  publishAgentEvent(event: AgentEvent) {
-    const runtimeEvent = this.convertAgentEvent(event);
+  publishAgentEvent(event: AgentEvent, options: AgentEventPublishOptions = {}) {
+    const runtimeEvent = this.convertAgentEvent(event, options);
     if (!runtimeEvent) return;
     for (const listener of this.listeners) listener(runtimeEvent);
   }
@@ -59,6 +64,15 @@ export class EventHub {
   publishToolRuntimeEvent(event: ToolRuntimeEvent) {
     const runtimeEvent = this.convertToolRuntimeEvent(event);
     if (!runtimeEvent) return;
+    for (const listener of this.listeners) listener(runtimeEvent);
+  }
+
+  /** 发布 session-level abort terminal 事件。 */
+  publishRunAborted() {
+    const runtimeEvent: AgentRuntimeEvent = {
+      type: "run_aborted",
+      sessionId: this.options.sessionId,
+    };
     for (const listener of this.listeners) listener(runtimeEvent);
   }
 
@@ -79,7 +93,10 @@ export class EventHub {
    * message/run 事件始终来自 pi-agent-core；工具事件是否使用这里的转换，
    * 由 `preferToolRuntimeEvents` 控制。
    */
-  private convertAgentEvent(event: AgentEvent): AgentRuntimeEvent | undefined {
+  private convertAgentEvent(
+    event: AgentEvent,
+    options: AgentEventPublishOptions,
+  ): AgentRuntimeEvent | undefined {
     if (event.type === "agent_start") {
       // 每次 agent_start 都重置 run outcome。
       this.runFailed = false;
@@ -102,6 +119,7 @@ export class EventHub {
         messageId: this.activeMessageId,
         role: event.message.role,
         text: readMessageText(event.message),
+        messageScope: options.messageScope ?? "persistent",
       };
     }
     if (event.type === "message_update" && this.activeMessageId) {
@@ -144,6 +162,7 @@ export class EventHub {
         messageId: this.activeMessageId,
         role: event.message.role,
         text: readMessageText(event.message),
+        messageScope: options.messageScope ?? "persistent",
       };
       this.activeMessageId = undefined;
       return runtimeEvent;

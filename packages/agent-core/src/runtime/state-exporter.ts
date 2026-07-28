@@ -3,6 +3,7 @@ import type {
   ConversationEntry,
   ConversationEntryId,
 } from "../conversation/conversation-entry.js";
+import { isConversationMessageEntry } from "../conversation/conversation-entry.js";
 import { buildActiveEntries } from "../conversation/conversation-projector.js";
 import { exportConversationEntriesState } from "../conversation/conversation-state.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
@@ -48,21 +49,24 @@ export class StateExporter {
    */
   syncFromSnapshot(snapshot: AgentLoopSnapshot) {
     const activeEntries = buildActiveEntries(this.entries, this.leafId);
-    if (snapshot.messages.length < activeEntries.length) {
+    const activeMessageCount = activeEntries.filter(isConversationMessageEntry).length;
+    if (snapshot.messages.length < activeMessageCount) {
       throw new Error(
         "Agent conversation graph cannot sync after message history shrank.",
       );
     }
 
-    const newMessages = snapshot.messages.slice(activeEntries.length);
+    const newMessages = snapshot.messages.slice(activeMessageCount);
     for (const message of newMessages) {
       // 每条新增消息都挂到当前 leaf 后面，形成一条新的 active path。
       const entry: ConversationEntry = {
-        type: "message",
+        kind: "message",
         id: this.nextEntryId(),
         parentId: this.leafId,
-        timestamp: new Date().toISOString(),
-        message: structuredClone(message),
+        createdAt: new Date().toISOString(),
+        payload: {
+          message: structuredClone(message),
+        },
       };
       this.entries.push(entry);
       this.leafId = entry.id;

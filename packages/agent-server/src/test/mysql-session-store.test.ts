@@ -9,9 +9,18 @@ const session: SessionRecord = {
   status: "running",
   modelId: "deepseek-chat",
   agentState: {
-    schemaVersion: 1,
+    schemaVersion: 2,
     modelId: "deepseek-chat",
-    payload: { messages: [{ role: "user", content: "hello" }] }
+    payload: {
+      entries: [{
+        kind: "message",
+        id: "message:1",
+        parentId: null,
+        createdAt: "2026-07-24T00:00:00.000Z",
+        payload: { message: { role: "user", content: "hello" } }
+      }],
+      leafId: "message:1"
+    }
   },
   messageCount: 1,
   version: 2,
@@ -34,7 +43,7 @@ test("creates a session with serialized Agent state and execution lease", async 
     "running",
     "deepseek-chat",
     JSON.stringify(session.agentState),
-    1,
+    2,
     1,
     2,
     "command-1",
@@ -98,6 +107,20 @@ test("atomically acquires an expired or empty execution lease", async () => {
   ]);
 });
 
+test("does not acquire execution leases for Sessions with unresolved commit failures", async () => {
+  const calls: QueryCall[] = [];
+  const store = new MySqlSessionStore(fakePool(calls, [result(0)]));
+
+  assert.equal(await store.acquireExecutionLease({
+    sessionId: "session-1",
+    commandId: "command-after-commit-failed",
+    leaseOwner: "worker-1",
+    now: 1_500,
+    leaseUntil: 2_500
+  }), undefined);
+  assert.match(calls[0]?.sql ?? "", /status NOT IN \('closed', 'commit_failed'\)/);
+});
+
 test("returns undefined when another Worker owns the execution lease", async () => {
   const store = new MySqlSessionStore(fakePool([], [result(0)]));
 
@@ -155,7 +178,7 @@ function sessionRow() {
     status: "running",
     model_id: "deepseek-chat",
     agent_state: JSON.stringify(session.agentState),
-    agent_state_schema_version: 1,
+    agent_state_schema_version: 2,
     message_count: 1,
     version: 2,
     executing_command_id: "command-1",

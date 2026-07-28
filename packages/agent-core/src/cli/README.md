@@ -92,13 +92,55 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 /policy on|off         Toggle default ToolPolicy.
 /approve ask|always|never
 /events on|off|json    Toggle AgentRuntime and ToolRuntime event printing.
+/eventlog [runId]      Print stored EventStore records.
+/toolcalls [runId]     Print projected tool call recovery records.
 /lifecycle on|off|json Toggle LifecycleRunner hook logging.
 /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
+/runs                  Print stored RunStore records.
 /state                 Print exported conversation state.
+/save                  Save conversation state to local storage.
+/delete                Delete the saved local conversation state.
+/storage               Print the local state file path.
+/context               Print the last assembled prompt context.
 /snapshot              Print runtime snapshot.
 /system                Print current assembled system prompt.
 /reset                 Reset conversation session.
 /exit                  Quit.
+```
+
+Slash-prefixed lines that are not playground commands, such as `/review target`,
+are sent to the runtime as prompts so `InputProcessor` slash metadata can be
+tested interactively.
+
+When `/lifecycle on` or `/lifecycle json` is enabled, the playground hooks also
+consume `/review` metadata: `beforeRun` adds a review-specific system prompt
+overlay, and `beforeContext` appends a review context message for the turn.
+The injected review message is run-local context: it is visible through
+`/context`, but it is not written to `/state`.
+Runtime message events include `messageScope`, so consumers can keep transient
+context in debug logs without rendering it as conversation transcript.
+
+The playground also records prompt execution into in-memory RunStore and
+EventStore instances. Use `/runs` to inspect prompt run outcomes, and
+`/eventlog` or `/eventlog <runId>` to inspect stored runtime events.
+Use `/toolcalls` or `/toolcalls <runId>` to inspect projected tool call recovery
+records from the same EventStore stream. Playground inspection commands such as
+`/state`, `/context`, `/runs`, `/eventlog`, and `/toolcalls` do not create new
+run records.
+
+The playground stores local conversation state as a JSON snapshot. By default,
+it reads and writes:
+
+```text
+<cwd>/.agent-platform/playground/sessions/agent-core-playground/state.json
+```
+
+Use `/storage` to print the exact path, `/save` to force a save, and `/delete`
+to remove the saved state. The playground also attempts to restore this file on
+startup and saves after successful or aborted prompt turns. To override the file:
+
+```bash
+npm run dev:core -- --agent-playground --playground-state-file /tmp/agent-state.json
 ```
 
 This mode exercises the whole path: `AgentDefinition -> RuntimeAssembler -> LifecycleRunner -> AgentLoop -> ToolRuntime -> ToolPolicy -> ToolOperations -> EventHub -> ConversationState`.
@@ -249,7 +291,7 @@ The final JSON line should use the entry graph payload:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "modelId": "...",
   "payload": {
     "entries": [],
@@ -258,7 +300,7 @@ The final JSON line should use the entry graph payload:
 }
 ```
 
-For a non-empty run, `payload.entries` contains message entries and `payload.leafId` points to the active leaf entry. New exports should not use the legacy `payload.messages` format, though restore remains backward-compatible with old saved sessions.
+For a non-empty run, `payload.entries` contains message entries and `payload.leafId` points to the active leaf entry. The old `payload.messages` format is not supported.
 
 Run the smoke check for this contract:
 

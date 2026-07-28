@@ -69,6 +69,8 @@ Current implementation status:
 - `beforeToolCall` and `afterToolCall` are wired through `ToolRuntime`.
 - `beforeCompaction` is defined but will only run after compaction policy is
   wired into the run pipeline.
+- `afterMessage` runs through a bounded FIFO event queue because loop events are
+  synchronous while message hooks may be asynchronous.
 
 ## Result Semantics
 
@@ -99,6 +101,8 @@ Actions:
 - `continue`: keep the current command and run the next hook.
 - `transform`: replace the command for downstream hooks and the agent loop.
 - `handled`: stop the hook chain and do not send the command to the model.
+- `metadata`: optional per-turn scratch metadata. Metadata is shallow-merged in
+  hook registration order, and later hooks see earlier metadata.
 
 Use `handled` for runtime-local inputs such as resource reload, local commands,
 or future skill commands that complete without an LLM call.
@@ -114,7 +118,11 @@ It can return:
 - A per-turn `systemPrompt` override.
 - Metadata for downstream lifecycle nodes.
 
-The override is temporary. It must not mutate the base `PromptPlan`.
+The override and additional messages are temporary run-local context. They are
+visible to the current model call, then removed from loop history before
+conversation state is exported.
+When `InputProcessor` parses slash command metadata, that metadata is passed to
+`beforeRun` as the initial per-turn metadata.
 
 ### beforeContext
 
@@ -129,6 +137,10 @@ It can return:
 
 This is the intended node for memory recall, active skill text, temporary
 materials, and future context budget handling.
+It receives the metadata produced by `InputProcessor` and `beforeRun`, and its
+metadata result is included in the final turn metadata passed to `afterRun`.
+Messages appended here are treated as transient context unless they preserve an
+existing persistent prompt message by identity.
 
 Current `TurnRunner` wiring requires returned `messages` to preserve the
 existing conversation prefix. Only messages after that prefix are passed to
@@ -173,6 +185,11 @@ It can return a replacement message. Replacements should preserve the original
 message role. This hook is for message normalization and extraction work, not
 for queue/retry decisions.
 
+If `afterMessage` throws, or if its replacement changes the message role,
+`AgentRuntimeSession` records a `LifecycleEventProcessingError`. The pending
+loop event flush then fails the turn, and `TurnRunner` notifies `afterRun` with
+`status: "failed"`.
+
 ### beforeCompaction
 
 `beforeCompaction` executes before conversation compaction.
@@ -201,7 +218,15 @@ diagnosable.
 Current behavior:
 
 - `ToolRuntime` decides how `afterToolCall` failures affect tool status.
-- Other lifecycle nodes currently allow errors to propagate to their caller.
+- `afterMessage` failures are wrapped as `LifecycleEventProcessingError` with
+  `stage: "afterMessage"` so callers can distinguish lifecycle processing from
+  model or tool failures.
+- The async loop event queue is bounded. Overflow is reported as
+  `LifecycleEventProcessingError` with `stage: "loopEventQueue"`.
+- `TurnRunner` calls `afterRun({ status: "failed" })` when input, context, loop
+  execution, event flushing, or state sync fails before a terminal afterRun
+  notification has already been sent.
+- Other lifecycle nodes allow errors to propagate to their caller.
 
 Target behavior:
 

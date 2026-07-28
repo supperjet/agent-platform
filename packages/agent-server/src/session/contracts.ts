@@ -11,7 +11,7 @@ export type CommandStatus =
   | "failed"
   | "cancelled";
 
-export type SessionStatus = "idle" | "running" | "failed" | "closed";
+export type SessionStatus = "idle" | "running" | "failed" | "commit_failed" | "closed";
 
 export type SessionExecutionLease =
   | { executingCommandId: string; leaseOwner: string; leaseUntil: number }
@@ -109,7 +109,7 @@ export type SubmittedCommand = {
 
 export type SessionView = {
   sessionId: string;
-  status: "idle" | "running";
+  status: SessionStatus;
   createdAt: string;
   lastActiveAt: string;
   messageCount: number;
