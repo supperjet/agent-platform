@@ -384,6 +384,22 @@ npm run dev:core -- --example-resources --resources runtime_notes,prompt_rules -
 
 The CLI does not register resources by default. `--example-resources` registers CLI-only static prompt resources and does not affect the core default resource registry.
 
+The local playground agent follows the application directory convention:
+
+```text
+src/cli/agent/
+  index.ts
+  resources/
+    instructions/
+    memory/
+    references/
+    prompt-templates/
+  skills/
+  tools/
+```
+
+`index.ts` is the agent entry point. `resources/` and `skills/` contain test text resources; `tools/` contains executable example tool definitions and stays outside the ResourceLoader boundary.
+
 Print registered resource metadata without running the model:
 
 ```bash

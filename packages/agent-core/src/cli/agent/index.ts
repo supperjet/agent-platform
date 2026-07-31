@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
 import { createInterface, type Interface } from "node:readline/promises";
-import type { AgentModel, AgentRuntime, AgentRuntimeCommand } from "../contracts.js";
+import type { AgentModel, AgentRuntime, AgentRuntimeCommand } from "../../contracts.js";
 import {
   createAgentResourceRegistry,
   createAgentToolRegistry,
@@ -26,15 +26,19 @@ import {
   type AgentRuntimeEvent,
   type AgentRuntimeStateSnapshot,
   type LifecycleHooks,
-} from "../index.js";
-import type { AgentResourceDefinition } from "../resources/resource-catalog.js";
-import type { AnyAgentToolDefinition } from "../tools/tool-registry.js";
+} from "../../index.js";
+import type { AgentResourceDefinition } from "../../resources/resource-catalog.js";
+import type { AnyAgentToolDefinition } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
-} from "../tools/policy/index.js";
-import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
-import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
-import { createUserMessage } from "../runtime/messages.js";
+} from "../../tools/policy/index.js";
+import type { ToolRuntimeEvent } from "../../tools/tool-runtime.js";
+import { RuntimeAssembler } from "../../runtime/runtime-assembler.js";
+import { createUserMessage } from "../../runtime/messages.js";
+import { exampleCliResources } from "./resources/index.js";
+import { exampleCliTools } from "./tools/index.js";
+
+export { exampleCliResources, exampleCliTools };
 
 type ApprovalMode = "ask" | "always" | "never";
 type EventMode = "off" | "on" | "json";

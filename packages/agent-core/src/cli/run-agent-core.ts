@@ -20,9 +20,11 @@ import {
 import { ResourceCatalog } from "../resources/resource-catalog.js";
 import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
 import { ToolCatalog } from "../tools/tool-catalog.js";
-import { startAgentPlayground } from "./agent-playground.js";
-import { exampleCliResources } from "./example-resources.js";
-import { exampleCliTools } from "./example-tools.js";
+import {
+  exampleCliResources,
+  exampleCliTools,
+  startAgentPlayground
+} from "./agent/index.js";
 
 type CliOptions = {
   json: boolean;

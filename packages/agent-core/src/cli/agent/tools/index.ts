@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineAgentTool } from "../tools/tool-registry.js";
+import { defineAgentTool } from "../../../tools/tool-registry.js";
 
 const inspectRuntimeParameters = Type.Object({
   topic: Type.String({ description: "Runtime topic to inspect." })

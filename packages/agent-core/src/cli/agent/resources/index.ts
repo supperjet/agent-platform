@@ -1,4 +1,4 @@
-import { defineAgentResource } from "../resources/resource-catalog.js";
+import { defineAgentResource } from "../../../resources/resource-catalog.js";
 
 export const exampleRuntimeNotesResource = defineAgentResource({
   name: "runtime_notes",
@@ -6,9 +6,9 @@ export const exampleRuntimeNotesResource = defineAgentResource({
   promptFragment: [
     "Runtime notes:",
     "- Runtime assembly resolves definition, resources, tools, prompt, model, and conversation before execution.",
-    "- Static resources are assembled before each runtime is created; they are not loaded dynamically in ResourceCatalog v1."
+    "- Static resources are assembled before each runtime is created; file resources are loaded through ResourceLoader."
   ].join("\n"),
-  sourceInfo: { source: "sdk", label: "CLI example" }
+  sourceInfo: { source: "sdk", label: "CLI agent example" }
 });
 
 export const examplePromptRulesResource = defineAgentResource({
@@ -19,7 +19,7 @@ export const examplePromptRulesResource = defineAgentResource({
     "- Treat resource prompt fragments as stable system prompt material.",
     "- Keep per-turn temporary context outside the static prompt plan."
   ].join("\n"),
-  sourceInfo: { source: "sdk", label: "CLI example" }
+  sourceInfo: { source: "sdk", label: "CLI agent example" }
 });
 
 export const exampleCliResources = [
