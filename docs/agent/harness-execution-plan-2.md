@@ -182,20 +182,97 @@ compaction 已在 `AgentRuntimeSession` 的 prompt preflight 阶段接入。
 - context overflow recovery。
 - provider overflow error normalization 与 compact + retry 上限。
 
-### 3.3 ResourceCatalog v2+
+### 3.3 ResourceLoader / ResourceCatalog v2+
 
-当前只是静态 registry 资源。
+当前只是静态 registry 资源，还没有形成 workspace text resource loading
+layer。下一版需要先明确 Resource 层边界：
+
+```text
+ResourceLoader
+  -> 发现、读取、分类、排序可序列化文本资源
+  -> 输出 loaded resource snapshot + diagnostics
+ResourceCatalog
+  -> 校验、索引、按 definition / scope 解析 active resources
+  -> 输出 PromptAssembler / ContextAssembler 可消费的资源投影
+```
+
+ResourceLoader 的产物必须是可序列化、可审计、无执行闭包的文本资源。
+它不发现、不注册、不执行 tools；tools 继续走 `ToolRegistry` /
+`ToolCatalog` / `ToolRuntime`。
+
+第一版 `LoadedResourceKind` 含义：
+
+- `instruction`：稳定规则和工作方式，例如 `AGENTS.md` / `CLAUDE.md`。
+  表达“应该怎么工作”，可包含编码约定、安全要求、测试命令、协作规则。
+- `memory`：长期事实和偏好，例如 `MEMORY.md`。表达“已经知道什么”，可包含
+  用户偏好、项目决策、历史踩坑、重要背景；第一版只读，不自动写入。
+- `skill`：可按需展开的能力说明，例如 `SKILL.md`。表达“当某类任务出现时，
+  应按这套流程/参考材料工作”；发现和加载属于 Resource 层，选择和展开由
+  InputProcessor / ContextAssembler 后续阶段处理。
+- `prompt-template`：可由 slash command 或输入处理选择的提示模板。表达“如何把
+  某类用户输入转换为结构化任务提示”；加载模板文本，不在 ResourceLoader 中执行
+  template expansion。
+- `reference`：普通参考材料，例如显式配置的项目文档、README 摘要或领域说明。
+  表达“可参考的信息”，不具备规则优先级，也不代表长期记忆。
+- `system-prompt`：替换基础 system prompt 的文本来源。一个 runtime 组装中最多应
+  解析出一个最终有效值；冲突需要 diagnostics。
+- `append-system-prompt`：追加到基础 system prompt 的文本来源。可有多个，按来源
+  顺序拼接，适合轻量附加说明。
+
+后期 agent 应用推荐使用文件夹区分资源类型，`index.ts` 作为主要应用入口和
+composition root：
+
+```text
+agent/
+  index.ts
+  resources/
+  skills/
+  tools/
+```
+
+目录约束：
+
+- `agent/index.ts`：声明 agent definition、model、启用的 resources / skills /
+  tools / policies / lifecycle hooks，并把这些材料交给 runtime factory。它是
+  组装入口，不承载资源读取、工具执行或具体业务实现细节。
+- `agent/resources/`：只放可序列化、可审计、无执行闭包的文本资源。这里的内容
+  进入 ResourceLoader / ResourceCatalog，可以被序列化为 diagnostics 或
+  resource snapshot。
+- `agent/skills/`：放 `SKILL.md` 风格的流程型能力说明。发现和读取属于
+  ResourceLoader，具体选择、展开和按需注入由后续 Skill / Prompt Template
+  阶段处理。
+- `agent/tools/`：放可执行工具定义。它们进入 `ToolRegistry` / `ToolCatalog` /
+  `ToolRuntime`，不进入 ResourceLoader / ResourceCatalog。
+
+`agent/resources/` 推荐继续按 kind 显式分层，便于 ResourceLoader 按目录推断
+`LoadedResourceKind`：
+
+```text
+agent/resources/
+  instructions/
+    AGENTS.md
+  memory/
+    MEMORY.md
+  references/
+    architecture.md
+  prompt-templates/
+    review.md
+```
+
+核心约束：`agent/resources/` 中的所有内容必须能被 JSON 序列化后展示、审计
+和测试；只有 `agent/tools/` 允许出现执行函数或运行时闭包。
 
 未实现：
 
 - 自动扫描 `AGENTS.md` / `CLAUDE.md`。
+- 自动扫描 `MEMORY.md`，作为第一版 file-backed memory。
 - context files discovery。
 - skills discovery。
 - prompt templates discovery。
 - resource reload。
 - `extendResources()`。
-- extension resource discovery。
 - trust/source scope。
+- resource diagnostics / source metadata / ordering。
 
 ### 3.4 Skill / Prompt Template
 
@@ -279,18 +356,29 @@ compaction 已在 `AgentRuntimeSession` 的 prompt preflight 阶段接入。
 conversation history 是原始对话记录，memory 是从会话中提炼出来、
 可在未来任务中复用的长期上下文。
 
+第一版 memory 不单独实现复杂 `MemoryStore`。先把 `MEMORY.md` 作为
+ResourceLoader 能发现和读取的一类文本资源：
+
+```text
+AGENTS.md  -> instructions：项目规则、工作方式、必须遵守的约定
+MEMORY.md  -> memory：项目事实、用户偏好、历史决策、踩坑记录
+conversation -> 当前 session 发生过什么
+compaction summary -> 当前 conversation 的压缩替身
+```
+
 未实现：
 
-- `MemoryStore`
-- memory entry schema。
-- memory extraction。
-- memory retrieval。
-- memory ranking / filtering。
-- memory 与 ContextAssembler 的接入点。
-- memory 的写入确认、更新和删除机制。
+- `MEMORY.md` discovery。
+- memory resource kind / scope / source metadata。
+- memory resource 在 prompt/context 中的独立边界。
+- memory resource diagnostics。
+- memory 与 `AGENTS.md`、conversation、compaction summary 的职责边界。
+- 后续可选：显式 memory edit/write command。
+- 后续可选：结构化 `MemoryStore`、memory extraction、retrieval、ranking /
+  filtering。
 - memory 与 compaction summary 的关系。
 
-第一版 memory 可以先只设计接口和存储结构，不急于实现复杂自动提取。
+第一版 memory 先只读、文件化、可审计，不急于实现复杂自动提取。
 
 ### 3.9 Public Surface 收口
 
@@ -428,10 +516,13 @@ metadata
 
 待完善：
 
-- memory 作为 ContextAssembler 的输入来源，而不是直接写入 system prompt。
-- memory extraction 可以由 lifecycle、后台任务或显式 command 触发。
-- memory retrieval 需要可解释 diagnostics，说明为什么某条 memory 被选中。
+- 第一版 memory 作为 ResourceLoader / ResourceCatalog 的 `memory` 文本资源，
+  而不是独立 `MemoryStore`。
+- memory 作为 ContextAssembler / PromptAssembler 的输入来源，不由运行流程
+  直接读文件。
+- memory context 需要独立边界和 diagnostics，说明来源、scope、排序和截断。
 - memory 不应默认写入 conversation，除非产生显式 memory entry 或 custom state。
+- memory extraction、retrieval、ranking 和 CRUD 延后到 file-backed v1 稳定之后。
 
 ### 4.7 Tool 层
 
@@ -1402,53 +1493,134 @@ recency 保护组合选择 source entries。
   保留情况，以及 `temperature`、`maxTokens`、`maxInputTokens` 和 system prompt 的
   最佳组合。
 
-### 阶段 F：Memory v1
+### 阶段 F：ResourceLoader / ResourceCatalog v2
 
-目标：实现长期上下文的最小闭环。
+目标：从静态 registry 资源升级为 workspace text resource layer，并明确
+Resource 层只处理可序列化、可审计、无执行闭包的文本资源。
+
+Resource 层职责边界：
+
+- 发现文本资源：`AGENTS.md` / `CLAUDE.md` / `MEMORY.md` / `SKILL.md` /
+  prompt templates / explicit reference resources。
+- 读取文本资源，保留 path、kind、scope、source、priority、loadedAt 等
+  metadata。
+- 分类文本资源，并严格遵守 3.3 中 `LoadedResourceKind` 的语义：
+  `instruction`、`memory`、`skill`、`prompt-template`、`reference`、
+  `system-prompt`、`append-system-prompt`。
+- 排序文本资源：global -> project -> cwd-nearest，或按显式 priority。
+- 产出结构化 diagnostics：missing、read failure、duplicate、conflict、
+  over budget、disabled。
+- 支持 reload / override / explicit extension of text resources。
+
+Resource 层明确不负责：
+
+- 不发现或注册 tools。
+- 不持有执行函数或闭包。
+- 不执行工具、不管理 approval、不管理 sandbox。
+- 不做 memory 自动抽取或写入。
+- 不存储 conversation，不做 compaction。
+- 不直接调用模型。
+- 不决定每轮动态 retrieval 策略。
+
+后期 Agent 应用目录约束：
+
+```text
+agent/
+  index.ts
+  resources/
+    instructions/
+      AGENTS.md
+    memory/
+      MEMORY.md
+    references/
+      *.md
+    prompt-templates/
+      *.md
+  skills/
+    <skill-name>/
+      SKILL.md
+  tools/
+    *.ts
+```
+
+- `agent/index.ts` 是 agent 应用入口和 composition root，只声明 definition、
+  model、启用资源、启用 skills、启用 tools、policies 和 runtime options。
+  它不直接承载大量 prompt/resource/tool 实现细节。
+- `agent/resources/` 只放可序列化、可审计、无执行闭包的文本资源。目录名可以
+  推断默认 `LoadedResourceKind`，文件 frontmatter 或显式配置可以覆盖 metadata。
+- `agent/resources/instructions/` 对应 `instruction`，用于规则、约定、工作方式。
+- `agent/resources/memory/` 对应 `memory`，用于 `MEMORY.md` 等长期事实和偏好。
+- `agent/resources/references/` 对应 `reference`，用于普通项目文档和领域材料。
+- `agent/resources/prompt-templates/` 对应 `prompt-template`，只加载模板文本，
+  expansion 由 InputProcessor / template 模块负责。
+- `agent/skills/` 放 `SKILL.md` 风格能力说明。ResourceLoader 可以发现和读取，
+  但 skill 选择、展开和激活上下文由后续 Skill 模块负责。
+- `agent/tools/` 放可执行工具定义，只进入 ToolRegistry / ToolCatalog /
+  ToolRuntime，不进入 ResourceLoader / ResourceCatalog。
+
+任务流程：
 
 建议顺序：
 
 ```text
-MemoryStore interface
-  -> manual memory write/read
-  -> memory retrieval
-  -> ContextAssembler 注入
-  -> extraction hook 预留
+LoadedResource schema
+  -> ResourceLoader discovery/read
+  -> ResourceCatalog indexing/resolve
+  -> PromptAssembler / ContextAssembler 消费
+  -> reload / diagnostics / debug
 ```
 
 工作项：
 
-- 定义 memory entry schema。
-- 实现 `MemoryStore` 接口和 in-memory adapter。
-- 支持按 scope / tag / relevance 查询 memory。
-- ContextAssembler 接入 memory retrieval 结果。
-- 明确 memory 与 conversation、compaction summary 的区别。
-- 暂缓复杂自动提取，先保留 lifecycle 或后台任务入口。
+- 定义 `LoadedTextResource` / `LoadedResourceKind` / `ResourceDiagnostics`。
+- 实现 ResourceLoader v1，先支持 workspace 文件发现和读取。
+- 扫描 `AGENTS.md` / `CLAUDE.md`，归类为 `instruction`。
+- 预留 `MEMORY.md`，归类为 `memory`，具体 memory 语义在阶段 G 收口。
+- 预留 `SKILL.md` 和 prompt templates 的 kind，但不急于实现完整 expansion。
+- ResourceCatalog v2 接收 ResourceLoader 输出，完成校验、去重、排序和解析。
+- PromptAssembler / ContextAssembler 消费 resource snapshot，而不是直接读文件。
+- 支持 resource reload。
+- playground 增加 resource debug 输出。
 
 验收：
 
-- 指定 memory 可以进入下一轮上下文。
-- memory 注入来源可诊断。
-- memory 不会无意污染 conversation history。
+- ResourceLoader 只产出可序列化文本资源。
+- tools 不进入 ResourceLoader / ResourceCatalog，仍由 ToolRegistry /
+  ToolCatalog 管理。
+- `AGENTS.md` / `CLAUDE.md` 可以被发现、排序、注入，并带来源 diagnostics。
+- diagnostics 结构化返回，不直接打印或退出进程。
+- ContextAssembler / PromptAssembler 不再直接负责文件发现。
 
-### 阶段 G：ResourceCatalog v2
+### 阶段 G：File-backed Memory v1
 
-目标：从静态 registry 资源升级为 workspace resource layer。
+目标：把 `MEMORY.md` 作为第一版长期记忆，复用阶段 F 的 ResourceLoader /
+ResourceCatalog 边界，先做只读、文件化、可审计的 memory context。
+
+Memory v1 职责边界：
+
+- `MEMORY.md` 表达“已经知道什么”：项目事实、用户偏好、历史决策、踩坑记录。
+- `AGENTS.md` 表达“应该怎么工作”：规则、约定、安全要求、流程要求。
+- conversation 表达“当前 session 发生过什么”。
+- compaction summary 表达“当前 conversation 的压缩替身”。
+- Memory v1 不自动写入，不做 embedding，不做后台提取。
 
 工作项：
 
-- 扫描 `AGENTS.md` / `CLAUDE.md`。
-- 支持 context files discovery。
-- 支持 prompt templates discovery。
-- 支持 resource reload。
-- 增加 diagnostics。
-- playground 增加资源/template debug 输出。
+- 扫描 global / project / cwd scoped `MEMORY.md`。
+- 将 `MEMORY.md` 加载为 `kind: "memory"` 的文本资源。
+- 在 prompt/context 中使用独立边界，例如 `<memory_context>`。
+- diagnostics 标明 memory 来源、scope、顺序和是否被 budget 截断。
+- 明确 memory 不写入 conversation state。
+- 暂缓自动 extraction、ranking、MemoryStore 和 CRUD。
+- 预留未来显式命令或工具编辑 `MEMORY.md` 的扩展点。
 
 验收：
 
-- ResourceCatalog 只发现和读取资源。
-- ContextAssembler 决定每轮哪些资源进入上下文。
-- diagnostics 结构化返回，不直接打印或退出进程。
+- `MEMORY.md` 可以进入下一轮上下文。
+- memory 注入来源可诊断。
+- memory 不会无意污染 conversation history。
+- memory 与 `AGENTS.md`、conversation、compaction summary 的区别在文档和测试
+  中明确。
 
 ### 阶段 H：Policies
 
@@ -1569,8 +1741,8 @@ Runtime/Lifecycle v1 小收尾
   -> Queue / Turn Execution
   -> 持久化与恢复
   -> ContextBudget / Compaction
-  -> Memory v1
-  -> ResourceCatalog v2
+  -> ResourceLoader / ResourceCatalog v2
+  -> File-backed Memory v1
   -> Policies
   -> Prompt Template / Skill
   -> Capability Pack
@@ -1580,8 +1752,8 @@ Runtime/Lifecycle v1 小收尾
 这个顺序的判断是：
 
 - 先完成可运行和可靠运行能力。
-- 再补长期上下文能力，包括 compaction 和 memory。
-- 然后再补资源发现、策略治理、template/skill 等更高层能力。
+- 再补长期上下文能力，包括 compaction、资源发现和 file-backed memory。
+- 然后再补策略治理、template/skill 等更高层能力。
 - 最后才抽象业务能力定义，避免把未稳定的 core 过早包装起来。
 
 做完这些后，`agent-core` 可以认为已经完成通用 Agent Runtime 的核心能力。

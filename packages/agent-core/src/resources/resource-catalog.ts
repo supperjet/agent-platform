@@ -1,14 +1,24 @@
 import type { AgentResourceName } from "../definition/agent-definition.js";
 import type { ResolvedAgentDefinition } from "../definition/definition-resolver.js";
+import type {
+  LoadedResourceKind,
+  LoadedResourceSnapshot,
+  LoadedTextResource,
+  ResourceDiagnostic,
+  ResourceLoader
+} from "./resource-loader.js";
 
 export type AgentResourceSourceInfo = {
   source: "builtin" | "registry" | "sdk" | "extension" | "file";
   label: string;
+  path?: string;
+  scope?: string;
 };
 
 export type AgentResourceDefinition = {
   name: AgentResourceName;
   label: string;
+  kind?: LoadedResourceKind;
   promptFragment: string; // Static prompt text injected into the assembled system prompt when this resource is active.
   sourceInfo: AgentResourceSourceInfo; // Catalog/debug metadata describing where the resource came from; not rendered as prompt text.
 };
@@ -16,6 +26,7 @@ export type AgentResourceDefinition = {
 export type ResourceCatalogEntry = {
   name: AgentResourceName;
   label: string;
+  kind?: LoadedResourceKind;
   promptFragment: string;
   sourceInfo: AgentResourceSourceInfo;
 };
@@ -23,6 +34,7 @@ export type ResourceCatalogEntry = {
 export type ResourceCatalogResourceInfo = {
   name: AgentResourceName;
   label: string;
+  kind?: LoadedResourceKind;
   sourceInfo: AgentResourceSourceInfo;
 };
 
@@ -36,6 +48,8 @@ export type ResourceCatalogResolution = {
 export type ResourceSnapshot = ResourceCatalogResolution & {
   contextFilePaths: readonly string[];
   skillNames: readonly string[];
+  loadedResources: readonly LoadedTextResource[];
+  diagnostics: readonly ResourceDiagnostic[];
 };
 
 export type ResourceCatalogLoadInput = {
@@ -92,15 +106,29 @@ export function createDefaultAgentResourceRegistry(): AgentResourceRegistry {
 
 export class ResourceCatalog {
   constructor(
-    private readonly registry: AgentResourceRegistry = createDefaultAgentResourceRegistry()
+    private readonly registry: AgentResourceRegistry = createDefaultAgentResourceRegistry(),
+    private readonly loader?: ResourceLoader
   ) {}
 
   load(input: ResourceCatalogLoadInput): ResourceSnapshot {
-    const resolution = this.resolveForDefinition(input.definition);
+    const loaded = this.loader?.load() ?? {
+      resources: [],
+      diagnostics: []
+    };
+    const resolution = mergeResourceResolutions(
+      this.resolveForDefinition(input.definition),
+      createLoadedResourceResolution(loaded)
+    );
     return {
       ...resolution,
-      contextFilePaths: [],
-      skillNames: []
+      contextFilePaths: loaded.resources.flatMap((resource) =>
+        resource.sourceInfo.path ? [resource.sourceInfo.path] : []
+      ),
+      skillNames: loaded.resources.flatMap((resource) =>
+        resource.kind === "skill" ? [resource.name] : []
+      ),
+      loadedResources: loaded.resources,
+      diagnostics: loaded.diagnostics
     };
   }
 
@@ -164,6 +192,7 @@ function createCatalogEntry(definition: AgentResourceDefinition): ResourceCatalo
   return {
     name,
     label: normalizeResourceText(`AgentResource.${name}.label`, definition.label),
+    ...(definition.kind ? { kind: definition.kind } : {}),
     promptFragment: normalizeResourcePromptFragment(name, definition.promptFragment),
     sourceInfo: normalizeSourceInfo(name, definition.sourceInfo)
   };
@@ -173,8 +202,87 @@ function toResourceInfo(entry: ResourceCatalogEntry): ResourceCatalogResourceInf
   return {
     name: entry.name,
     label: entry.label,
+    ...(entry.kind ? { kind: entry.kind } : {}),
     sourceInfo: entry.sourceInfo
   };
+}
+
+function createLoadedResourceResolution(
+  loaded: LoadedResourceSnapshot
+): ResourceCatalogResolution {
+  const entries = loaded.resources
+    .filter(shouldInjectLoadedResource)
+    .map(createLoadedResourceCatalogEntry);
+  return {
+    resourceNames: entries.map((entry) => entry.name),
+    entries,
+    resourceInfos: entries.map(toResourceInfo),
+    promptFragments: entries.map((entry) => entry.promptFragment)
+  };
+}
+
+function shouldInjectLoadedResource(resource: LoadedTextResource): boolean {
+  return resource.kind !== "prompt-template" && resource.kind !== "skill";
+}
+
+function createLoadedResourceCatalogEntry(
+  resource: LoadedTextResource
+): ResourceCatalogEntry {
+  return {
+    name: normalizeSingleResourceName("LoadedTextResource.name", resource.name),
+    label: normalizeResourceText(`LoadedTextResource.${resource.name}.label`, resource.label),
+    kind: resource.kind,
+    promptFragment: formatLoadedResourcePromptFragment(resource),
+    sourceInfo: {
+      source: resource.sourceInfo.source,
+      label: normalizeResourceText(`LoadedTextResource.${resource.name}.sourceInfo.label`, resource.sourceInfo.label),
+      ...(resource.sourceInfo.path ? { path: resource.sourceInfo.path } : {}),
+      scope: resource.sourceInfo.scope
+    }
+  };
+}
+
+function mergeResourceResolutions(
+  registryResolution: ResourceCatalogResolution,
+  loadedResolution: ResourceCatalogResolution
+): ResourceCatalogResolution {
+  return {
+    resourceNames: [
+      ...registryResolution.resourceNames,
+      ...loadedResolution.resourceNames
+    ],
+    entries: [
+      ...registryResolution.entries,
+      ...loadedResolution.entries
+    ],
+    resourceInfos: [
+      ...registryResolution.resourceInfos,
+      ...loadedResolution.resourceInfos
+    ],
+    promptFragments: [
+      ...registryResolution.promptFragments,
+      ...loadedResolution.promptFragments
+    ]
+  };
+}
+
+function formatLoadedResourcePromptFragment(resource: LoadedTextResource): string {
+  const sourcePath = resource.sourceInfo.path ?? resource.sourceInfo.label;
+  switch (resource.kind) {
+    case "instruction":
+      return `<project_instructions source="${sourcePath}">\n${resource.content}\n</project_instructions>`;
+    case "memory":
+      return `<memory_context source="${sourcePath}">\n${resource.content}\n</memory_context>`;
+    case "reference":
+      return `<reference_context source="${sourcePath}">\n${resource.content}\n</reference_context>`;
+    case "system-prompt":
+      return resource.content;
+    case "append-system-prompt":
+      return resource.content;
+    case "prompt-template":
+    case "skill":
+      throw new Error(`Loaded resource kind "${resource.kind}" is not directly injectable.`);
+  }
 }
 
 function normalizeResourceNames(names: readonly AgentResourceName[]): readonly AgentResourceName[] {
@@ -224,7 +332,9 @@ function normalizeSourceInfo(resourceName: string, sourceInfo: AgentResourceSour
   }
   return {
     source: sourceInfo.source,
-    label: normalizeResourceText(`AgentResource.${resourceName}.sourceInfo.label`, sourceInfo.label)
+    label: normalizeResourceText(`AgentResource.${resourceName}.sourceInfo.label`, sourceInfo.label),
+    ...(sourceInfo.path ? { path: sourceInfo.path } : {}),
+    ...(sourceInfo.scope ? { scope: sourceInfo.scope } : {})
   };
 }
 

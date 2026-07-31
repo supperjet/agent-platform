@@ -29,6 +29,7 @@ import {
   type AgentResourceRegistry,
   type ResourceSnapshot,
 } from "../resources/resource-catalog.js";
+import type { ResourceLoader } from "../resources/resource-loader.js";
 import {
   ToolCatalog,
   type ToolCatalogResolution,
@@ -118,6 +119,8 @@ export type RuntimeAssemblerOptions = {
   services?: Partial<RuntimeAssemblerServices>;
   /** 注入资源注册表，交给 ResourceCatalog 使用。 */
   resourceRegistry?: AgentResourceRegistry;
+  /** 注入 workspace 文本资源加载器，交给 ResourceCatalog 使用。 */
+  resourceLoader?: ResourceLoader;
   /** 注入工具注册表，交给 ToolCatalog 使用。 */
   toolRegistry?: AgentToolRegistry;
 };
@@ -220,7 +223,7 @@ function createRuntimeAssemblerServices(
   const lifecycleHooks = options.services?.lifecycleHooks ?? createDefaultLifecycleHooks();
   const defaultServices: RuntimeAssemblerServices = {
     definitionResolver: new DefinitionResolver(),
-    resourceCatalog: new ResourceCatalog(options.resourceRegistry),
+    resourceCatalog: new ResourceCatalog(options.resourceRegistry, options.resourceLoader),
     promptAssembler: new PromptAssembler(),
     toolCatalog: new ToolCatalog(options.toolRegistry),
     toolRuntime: createToolRuntime({

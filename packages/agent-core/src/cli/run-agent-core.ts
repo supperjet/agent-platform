@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
-import { fauxAssistantMessage, fauxText, getModels, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, registerFauxProvider } from "@earendil-works/pi-ai";
 import {
   createAgentResourceRegistry,
   createAgentToolRegistry,
@@ -13,7 +13,8 @@ import {
   formatAgentDefinition,
   PiAgentRuntimeFactory,
   createLocalToolOperations,
-  type AgentModel,
+  DEFAULT_DEEPSEEK_MODEL_ID,
+  getDeepSeekModel,
   type AgentRuntimeEvent
 } from "../index.js";
 import { ResourceCatalog } from "../resources/resource-catalog.js";
@@ -182,7 +183,7 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     fauxResponses: [],
     exampleResources: false,
     exampleTools: false,
-    modelId: process.env.DEEPSEEK_MODEL_ID ?? "deepseek-v4-flash",
+    modelId: process.env.DEEPSEEK_MODEL_ID ?? DEFAULT_DEEPSEEK_MODEL_ID,
     agentPlayground: false,
     playgroundCompactionSummarizer: "fallback",
     approveToolCall: false,
@@ -569,15 +570,6 @@ function stripDotEnvQuotes(value: string) {
     return value.slice(1, -1);
   }
   return value;
-}
-
-function getDeepSeekModel(modelId: string): AgentModel {
-  const models = getModels("deepseek");
-  const model = models.find((candidate) => candidate.id === modelId);
-  if (!model) {
-    throw new Error(`Unknown DeepSeek model "${modelId}". Available: ${models.map((item) => item.id).join(", ")}`);
-  }
-  return model;
 }
 
 main().catch((error: unknown) => {

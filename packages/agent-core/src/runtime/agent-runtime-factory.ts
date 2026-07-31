@@ -5,6 +5,7 @@ import {
 } from "../contracts.js";
 import type { AgentDefinition } from "../definition/agent-definition.js";
 import type { AgentResourceRegistry } from "../resources/resource-catalog.js";
+import type { ResourceLoader } from "../resources/resource-loader.js";
 import type { AgentToolRegistry } from "../tools/tool-registry.js";
 import type { ToolRuntime } from "../tools/tool-runtime.js";
 import type { LifecycleHooks } from "../lifecycle/lifecycle-hooks.js";
@@ -28,6 +29,8 @@ export type PiAgentRuntimeFactoryOptions = {
   definition: AgentDefinition;
   /** 可选资源注册表；未传入时只使用空资源集合。 */
   resourceRegistry?: AgentResourceRegistry;
+  /** 可选 workspace 文本资源加载器；用于加载 AGENTS.md / MEMORY.md 等资源。 */
+  resourceLoader?: ResourceLoader;
   /** 可选工具注册表；未传入时只使用空工具集合。 */
   toolRegistry?: AgentToolRegistry;
   /** 可选工具运行时；用于注入 policy、approval、生命周期监听等执行控制能力。 */
@@ -69,6 +72,9 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
 
     if (this.options.resourceRegistry) {
       assemblerParams.resourceRegistry = this.options.resourceRegistry;
+    }
+    if (this.options.resourceLoader) {
+      assemblerParams.resourceLoader = this.options.resourceLoader;
     }
     if (this.options.toolRegistry) {
       assemblerParams.toolRegistry = this.options.toolRegistry;
