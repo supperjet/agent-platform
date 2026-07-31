@@ -13,7 +13,7 @@ import {
 } from "../../index.js";
 import type { AgentPlaygroundOptions } from "./main.js";
 
-config({ path: new URL("../../../../.env", import.meta.url) });
+config({ path: new URL("../../../../../.env", import.meta.url), quiet: true });
 
 export { startAgentPlayground };
 export type { AgentPlaygroundOptions };
