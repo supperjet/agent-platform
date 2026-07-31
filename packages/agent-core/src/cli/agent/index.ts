@@ -21,8 +21,9 @@ export type { AgentPlaygroundOptions };
 async function main() {
   // 解析 agent 应用目录
   const agentDir = resolveAgentDir();
+  const workingDirectory = process.cwd();
   const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
-  const toolRegistry = await new ToolsLoader({ agentDir }).createRegistry();
+  const toolRegistry = await new ToolsLoader({ agentDir, workingDirectory }).createRegistry();
   // 获取模型
   const model = getDeepSeekModel();
 
@@ -30,7 +31,7 @@ async function main() {
     model,
     resourceRegistry,
     toolRegistry,
-    workingDirectory: process.cwd(),
+    workingDirectory,
     resolveApiKey: (provider) => provider === "deepseek"
       ? process.env.DEEPSEEK_API_KEY
       : undefined,

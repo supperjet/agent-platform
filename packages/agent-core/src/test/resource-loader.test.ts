@@ -112,7 +112,7 @@ test("ResourceLoader creates a registry from directly injectable text resources"
   }
 });
 
-test("ToolsLoader creates a registry from the agent tools entry", async () => {
+test("ToolsLoader creates a registry from built-in tools and the agent tools entry", async () => {
   const agentDir = createTempAgentDir();
   try {
     writeResource(agentDir, "tools/index.js", [
@@ -131,6 +131,44 @@ test("ToolsLoader creates a registry from the agent tools entry", async () => {
     ].join("\n"));
 
     const registry = await new ToolsLoader({ agentDir }).createRegistry();
+
+    assert.deepEqual(registry.getAllEntries().map((entry) => entry.tool.name), [
+      "read",
+      "ls",
+      "grep",
+      "find",
+      "write",
+      "edit",
+      "bash",
+      "inspect_runtime"
+    ]);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("ToolsLoader can create an agent-only registry without built-in tools", async () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeResource(agentDir, "tools/index.js", [
+      "export const tools = [{",
+      "  name: \"inspect_runtime\",",
+      "  label: \"Inspect Runtime\",",
+      "  description: \"Inspect runtime state.\",",
+      "  promptSnippet: \"Inspect runtime state.\",",
+      "  promptGuidelines: [],",
+      "  sourceInfo: { source: \"sdk\", label: \"test\" },",
+      "  parameters: {},",
+      "  async execute() {",
+      "    return { content: [{ type: \"text\", text: \"ok\" }], details: {} };",
+      "  }",
+      "}];"
+    ].join("\n"));
+
+    const registry = await new ToolsLoader({
+      agentDir,
+      includeBuiltInTools: false
+    }).createRegistry();
 
     assert.deepEqual(registry.getAllEntries().map((entry) => entry.tool.name), [
       "inspect_runtime"

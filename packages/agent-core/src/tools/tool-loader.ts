@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createBuiltInToolDefinitions } from "./built-in/index.js";
+import { createLocalToolOperations } from "./operations/index.js";
 import {
   createAgentToolRegistry,
   type AgentToolRegistry,
@@ -10,6 +12,10 @@ import {
 export type ToolsLoaderOptions = {
   /** Directory that contains agent/index.ts, resources/, skills/, and tools/. */
   agentDir: string;
+  /** Working directory used by built-in local tools. Defaults to process.cwd(). */
+  workingDirectory?: string;
+  /** Whether to include core built-in tools. Defaults to true. */
+  includeBuiltInTools?: boolean;
 };
 
 export type LoadedToolsSnapshot = {
@@ -32,17 +38,22 @@ export type ToolsDiagnostic = {
  */
 export class ToolsLoader {
   private readonly agentDir: string;
+  private readonly workingDirectory: string;
+  private readonly includeBuiltInTools: boolean;
 
   constructor(options: ToolsLoaderOptions) {
     this.agentDir = resolve(options.agentDir);
+    this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
+    this.includeBuiltInTools = options.includeBuiltInTools ?? true;
   }
 
   async load(): Promise<LoadedToolsSnapshot> {
+    const builtInTools = this.loadBuiltInTools();
     const toolsEntry = resolveToolsEntry(this.agentDir);
     if (!toolsEntry) {
       const expectedPath = join(this.agentDir, "tools", "index.js");
       return {
-        tools: [],
+        tools: builtInTools,
         diagnostics: [{
           type: "warning",
           code: "missing-tools-entry",
@@ -57,7 +68,7 @@ export class ToolsLoader {
       const tools = readToolsExport(module);
       if (!tools) {
         return {
-          tools: [],
+          tools: builtInTools,
           diagnostics: [{
             type: "error",
             code: "invalid-tools-export",
@@ -67,12 +78,15 @@ export class ToolsLoader {
         };
       }
       return {
-        tools,
+        tools: [
+          ...builtInTools,
+          ...tools
+        ],
         diagnostics: []
       };
     } catch (error) {
       return {
-        tools: [],
+        tools: builtInTools,
         diagnostics: [{
           type: "error",
           code: "load-failed",
@@ -87,6 +101,13 @@ export class ToolsLoader {
     const snapshot = await this.load();
     throwIfToolsLoadFailed(snapshot.diagnostics);
     return createAgentToolRegistry(snapshot.tools);
+  }
+
+  private loadBuiltInTools(): readonly AnyAgentToolDefinition[] {
+    if (!this.includeBuiltInTools) return [];
+    return createBuiltInToolDefinitions(createLocalToolOperations({
+      cwd: this.workingDirectory
+    }));
   }
 }
 

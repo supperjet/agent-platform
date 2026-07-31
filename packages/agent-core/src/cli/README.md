@@ -42,7 +42,7 @@ src/cli/agent/
 Loader and registry responsibilities are separate:
 
 - `ResourceLoader({ agentDir }).createRegistry()` discovers text resources and creates the resource registry.
-- `ToolsLoader({ agentDir }).createRegistry()` imports `tools/index.js` and creates the tool registry.
+- `ToolsLoader({ agentDir }).createRegistry()` registers core built-in tools, imports `tools/index.js`, and creates the tool registry.
 - `startAgentPlayground` receives registries only; it does not expose loader parameters.
 
 ## Playground Commands
