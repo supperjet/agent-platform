@@ -1,6 +1,13 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 
+/**
+ * ResourceLoader 只处理“文本资源”的发现和读取。
+ *
+ * 这里的 kind 表示资源进入 agent 上下文前的语义分类，不表示执行能力。
+ * 可执行工具即使也来自 agent/ 目录，也必须留在 tools/ 层，由 ToolRegistry /
+ * ToolCatalog / ToolRuntime 负责。
+ */
 export type LoadedResourceKind =
   | "instruction"
   | "memory"
@@ -12,6 +19,7 @@ export type LoadedResourceKind =
 
 export type LoadedResourceScope = "global" | "project" | "workspace" | "explicit";
 
+/** 描述一个文本资源从哪里来；用于 diagnostics、debug UI 和审计，不直接渲染成 prompt。 */
 export type LoadedResourceSourceInfo = {
   source: "file" | "sdk";
   label: string;
@@ -19,6 +27,12 @@ export type LoadedResourceSourceInfo = {
   scope: LoadedResourceScope;
 };
 
+/**
+ * ResourceLoader 的核心产物。
+ *
+ * 这条类型刻意保持可序列化：没有执行函数、没有闭包、没有运行期对象引用。
+ * 后续 ResourceCatalog / PromptAssembler 可以安全地把它暴露给调试界面或写入快照。
+ */
 export type LoadedTextResource = {
   name: string;
   label: string;
@@ -29,6 +43,7 @@ export type LoadedTextResource = {
   loadedAt: string;
 };
 
+/** 资源加载阶段只收集诊断，不直接打印、不退出进程，由上层决定如何呈现或失败。 */
 export type ResourceDiagnostic = {
   type: "warning" | "error";
   code:
@@ -40,11 +55,13 @@ export type ResourceDiagnostic = {
   path?: string;
 };
 
+/** 一次资源加载的完整快照：文本资源 + 结构化诊断。 */
 export type LoadedResourceSnapshot = {
   resources: readonly LoadedTextResource[];
   diagnostics: readonly ResourceDiagnostic[];
 };
 
+/** ResourceLoader 是一个窄接口，方便未来替换为数据库、远程包或测试 fake。 */
 export type ResourceLoader = {
   load(): LoadedResourceSnapshot;
 };
@@ -61,6 +78,12 @@ type ResourceDirectory = {
   priority: number;
 };
 
+/**
+ * 第一版应用目录约定。
+ *
+ * agent/tools 不在这里出现：tools 包含执行语义，不能混进可序列化文本资源层。
+ * prompt-template 和 skill 先被发现，但是否按需展开由后续输入/上下文模块决定。
+ */
 const RESOURCE_DIRECTORIES: readonly ResourceDirectory[] = [
   { relativePath: "resources/instructions", kind: "instruction", priority: 100 },
   { relativePath: "resources/memory", kind: "memory", priority: 200 },
@@ -71,6 +94,23 @@ const RESOURCE_DIRECTORIES: readonly ResourceDirectory[] = [
 
 const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
 
+/**
+ * 从 agent 应用目录加载文本资源。
+ *
+ * 目录示例：
+ *
+ * ```text
+ * agent/
+ *   index.ts
+ *   resources/
+ *     instructions/
+ *     memory/
+ *     references/
+ *     prompt-templates/
+ *   skills/
+ *   tools/
+ * ```
+ */
 export class AgentAppResourceLoader implements ResourceLoader {
   private readonly agentDir: string;
   private readonly now: () => Date;
@@ -96,6 +136,7 @@ export class AgentAppResourceLoader implements ResourceLoader {
 
     const resources: LoadedTextResource[] = [];
     for (const directory of RESOURCE_DIRECTORIES) {
+      // 缺失目录表示该类资源未启用，不作为错误处理。
       const dirPath = join(this.agentDir, directory.relativePath);
       if (!existsSync(dirPath)) continue;
       resources.push(...this.loadDirectory(dirPath, directory, diagnostics));
@@ -137,6 +178,7 @@ export class AgentAppResourceLoader implements ResourceLoader {
 
     for (const entry of entries) {
       const entryPath = join(currentDir, entry.name);
+      // skills/<name>/SKILL.md 和 references 子目录都通过同一套递归规则处理。
       if (entry.isDirectory()) {
         resources.push(...this.walk(entryPath, directory, diagnostics));
         continue;
@@ -150,6 +192,7 @@ export class AgentAppResourceLoader implements ResourceLoader {
         });
         continue;
       }
+      // 非文本文件保持沉默跳过，避免 images、fixtures 等旁路材料污染上下文。
       if (!isTextResourceFile(entry.name)) continue;
       const resource = this.loadFile(entryPath, directory, diagnostics);
       if (resource) resources.push(resource);
@@ -167,6 +210,7 @@ export class AgentAppResourceLoader implements ResourceLoader {
       const content = readFileSync(filePath, "utf-8").trim();
       if (!content) return undefined;
       const relativePath = normalizePath(relative(this.agentDir, filePath));
+      // name 使用 kind + 相对路径，避免不同目录里的同名文件互相覆盖。
       const name = createResourceName(directory.kind, relativePath);
       return {
         name,
@@ -200,6 +244,8 @@ function sortResources(
 ): readonly LoadedTextResource[] {
   const seen = new Set<string>();
   return [...resources]
+    // priority 保证 instruction/memory/reference/template/skill 的稳定顺序；
+    // label 排序让同类资源跨平台保持可预测。
     .sort((left, right) =>
       left.priority - right.priority ||
       left.sourceInfo.label.localeCompare(right.sourceInfo.label)
