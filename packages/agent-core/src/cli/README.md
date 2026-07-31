@@ -10,7 +10,7 @@ Start the local agent playground:
 npm run dev:core
 ```
 
-The current CLI application entry is intentionally small: it always uses the default DeepSeek model and reads the API key from the environment:
+The current CLI application entry is intentionally small: it always uses the default DeepSeek model and reads the API key from the project root `.env` or the process environment:
 
 ```dotenv
 DEEPSEEK_API_KEY=...

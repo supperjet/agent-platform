@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.79.10",
-    "@earendil-works/pi-ai": "^0.79.10"
+    "@earendil-works/pi-ai": "^0.79.10",
+    "dotenv": "^17.4.2"
   }
 }

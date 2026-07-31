@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { config } from "dotenv";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { stderr } from "node:process";
@@ -12,6 +13,8 @@ import {
 } from "../../index.js";
 import type { AgentPlaygroundOptions } from "./main.js";
 
+config({ path: new URL("../../../../.env", import.meta.url) });
+
 export { startAgentPlayground };
 export type { AgentPlaygroundOptions };
 
@@ -20,7 +23,6 @@ async function main() {
   const agentDir = resolveAgentDir();
   const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
   const toolRegistry = await new ToolsLoader({ agentDir }).createRegistry();
-
   // 获取模型
   const model = getDeepSeekModel();
 
