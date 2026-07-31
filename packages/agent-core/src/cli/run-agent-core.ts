@@ -5,35 +5,30 @@ import { dirname, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
 import { fauxAssistantMessage, fauxText, registerFauxProvider } from "@earendil-works/pi-ai";
 import {
-  createAgentResourceRegistry,
-  createAgentToolRegistry,
-  createBuiltInToolDefinitions,
   createDefaultToolPolicy,
   createToolRuntime,
   formatAgentDefinition,
   PiAgentRuntimeFactory,
-  createLocalToolOperations,
   DEFAULT_DEEPSEEK_MODEL_ID,
-  getDeepSeekModel,
   type AgentRuntimeEvent
 } from "../index.js";
 import { ResourceCatalog } from "../resources/resource-catalog.js";
 import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
 import { ToolCatalog } from "../tools/tool-catalog.js";
 import {
-  exampleCliResources,
-  exampleCliTools,
-  startAgentPlayground
+  createCliAgentApiKeyResolver,
+  createCliAgentResourceRegistry,
+  createCliAgentToolRegistry,
+  loadCliAgentModel,
+  startCliAgentPlayground
 } from "./agent/index.js";
 
 type CliOptions = {
   json: boolean;
   faux: boolean;
   fauxResponses: string[];
-  exampleResources: boolean;
-  exampleTools: boolean;
   modelId: string;
-  agentPlayground: boolean;
+  playground: boolean;
   playgroundCompactionSummarizer: "fallback" | "llm";
   callTool?: string;
   approveToolCall: boolean;
@@ -54,12 +49,6 @@ type CliOptions = {
 async function main() {
   loadDotEnv();
   const options = await parseArgs(process.argv.slice(2));
-  if (!options.prompt.trim() && !options.agentPlayground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources) {
-    printUsage();
-    process.exitCode = 1;
-    return;
-  }
-
   const registration = options.faux
     ? registerFauxProvider({ provider: "agent-core-cli-faux" })
     : undefined;
@@ -71,27 +60,12 @@ async function main() {
   }
 
   try {
-    const resourceRegistry = options.exampleResources
-      ? createAgentResourceRegistry(exampleCliResources)
-      : undefined;
-    const toolOperations = createLocalToolOperations({ cwd: options.toolCwd });
-    const toolRegistry = createAgentToolRegistry([
-      ...createBuiltInToolDefinitions(toolOperations),
-      ...(options.exampleTools ? exampleCliTools : [])
-    ]);
+    const resourceRegistry = createCliAgentResourceRegistry();
+    const toolRegistry = createCliAgentToolRegistry({ cwd: options.toolCwd });
 
-    if (options.agentPlayground) {
-      const model = registration ? registration.getModel() : getDeepSeekModel(options.modelId);
-      const resolveApiKey = (provider: string) => {
-        if (registration && provider === model.provider) return "faux-key";
-        if (provider !== "deepseek") return undefined;
-        return process.env.DEEPSEEK_API_KEY;
-      };
-      await startAgentPlayground({
-        model,
-        resolveApiKey,
-        exampleResources: options.exampleResources ? exampleCliResources : [],
-        exampleTools: options.exampleTools ? exampleCliTools : [],
+    if (options.playground) {
+      await startCliAgentPlayground({
+        ...(registration ? { fauxModel: registration.getModel() } : { modelId: options.modelId }),
         initialCwd: options.toolCwd,
         ...(options.toolNames.length > 0 ? { initialToolNames: options.toolNames } : {}),
         ...(options.resourceNames.length > 0 ? { initialResourceNames: options.resourceNames } : {}),
@@ -108,7 +82,7 @@ async function main() {
       return;
     }
 
-    const model = registration ? registration.getModel() : getDeepSeekModel(options.modelId);
+    const model = loadCliAgentModel(registration ? { fauxModel: registration.getModel() } : { modelId: options.modelId });
     const definition = formatAgentDefinition({
       id: "agent-core-cli",
       model,
@@ -121,11 +95,7 @@ async function main() {
       resourceNames: options.resourceNames
     });
 
-    const resolveApiKey = (provider: string) => {
-      if (registration && provider === model.provider) return "faux-key";
-      if (provider !== "deepseek") return undefined;
-      return process.env.DEEPSEEK_API_KEY;
-    };
+    const resolveApiKey = createCliAgentApiKeyResolver(model, registration?.getModel().provider);
 
     if (options.printResources) {
       const catalog = new ResourceCatalog(resourceRegistry);
@@ -141,8 +111,8 @@ async function main() {
 
     if (options.printSystemPrompt) {
       const assembly = new RuntimeAssembler({
-        ...(resourceRegistry ? { resourceRegistry } : {}),
-        ...(toolRegistry ? { toolRegistry } : {})
+        resourceRegistry,
+        toolRegistry
       }).assemble({
         sessionId: "agent-core-cli",
         definition,
@@ -154,8 +124,8 @@ async function main() {
 
     const runtime = new PiAgentRuntimeFactory({
       definition,
-      ...(resourceRegistry ? { resourceRegistry } : {}),
-      ...(toolRegistry ? { toolRegistry } : {}),
+      resourceRegistry,
+      toolRegistry,
       ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
       resolveApiKey
     }).create("agent-core-cli");
@@ -183,10 +153,8 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     json: false,
     faux: false,
     fauxResponses: [],
-    exampleResources: false,
-    exampleTools: false,
     modelId: process.env.DEEPSEEK_MODEL_ID ?? DEFAULT_DEEPSEEK_MODEL_ID,
-    agentPlayground: false,
+    playground: false,
     playgroundCompactionSummarizer: "fallback",
     approveToolCall: false,
     noToolPolicy: false,
@@ -218,12 +186,8 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
       options.faux = true;
       continue;
     }
-    if (arg === "--example-tools") {
-      options.exampleTools = true;
-      continue;
-    }
-    if (arg === "--example-resources") {
-      options.exampleResources = true;
+    if (arg === "--example-tools" || arg === "--example-resources") {
+      // 兼容旧 CLI；agent/ 应用目录里的资源和工具现在默认发现加载。
       continue;
     }
     if (arg === "--faux-response") {
@@ -238,8 +202,8 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
       options.requestTimeoutMs = parsePositiveInteger(requireValue(args, ++index, "--request-timeout-ms"), "--request-timeout-ms");
       continue;
     }
-    if (arg === "--agent-playground") {
-      options.agentPlayground = true;
+    if (arg === "--playground" || arg === "--agent-playground") {
+      options.playground = true;
       continue;
     }
     if (arg === "--playground-state-file") {
@@ -307,8 +271,11 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
   if (options.fauxResponses.length === 0) {
     options.fauxResponses.push("Faux runtime response.");
   }
-  if (!options.prompt && !options.agentPlayground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources && !stdin.isTTY) {
+  if (!options.prompt && !options.playground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources && !stdin.isTTY) {
     options.prompt = await readStdin();
+  }
+  if (!options.prompt && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources) {
+    options.playground = true;
   }
   return options;
 }
@@ -319,7 +286,7 @@ function parsePlaygroundCompactionSummarizer(value: string): "fallback" | "llm" 
 }
 
 async function callToolDirectly(
-  toolRegistry: ReturnType<typeof createAgentToolRegistry>,
+  toolRegistry: ReturnType<typeof createCliAgentToolRegistry>,
   options: CliOptions,
 ) {
   const entry = toolRegistry.getEntry(options.callTool ?? "");
@@ -483,20 +450,21 @@ function readStdin() {
 
 function printUsage() {
   stdout.write(`Usage:
+  npm run dev:core
   npm run dev:core -- "你的问题"
   npm run dev:core -- --json "你的问题"
   npm run dev:core -- --faux "测试运行链路"
-  npm run dev:core -- --example-tools --tools inspect_runtime,read_note --print-system-prompt
-  npm run dev:core -- --example-tools --print-tools
-  npm run dev:core -- --agent-playground
+  npm run dev:core -- --tools inspect_runtime,read_note --print-system-prompt
+  npm run dev:core -- --print-tools
+  npm run dev:core -- --playground
   npm run dev:core -- --call-tool read --tool-args '{"path":"package.json"}'
-  npm run dev:core -- --example-resources --print-resources
+  npm run dev:core -- --print-resources
 
 Options:
   --json                    Output AgentRuntimeEvent as JSON lines.
   --faux                    Use a local faux provider instead of DeepSeek.
   --faux-response <text>    Response text for --faux mode.
-  --agent-playground        Start an interactive AgentRuntime playground.
+  --playground              Start an interactive AgentRuntime playground. This is the default when no prompt is provided.
   --playground-state-file <path>
                             Override the playground local state file.
   --playground-compaction-summarizer <fallback|llm>
@@ -506,9 +474,7 @@ Options:
   --tool-cwd <path>         Working directory for built-in ToolOperations. Defaults to process cwd.
   --approve-tool-call       Auto-approve policy approval requests in --call-tool mode.
   --no-tool-policy          Disable default ToolPolicy in --call-tool mode.
-  --example-resources       Register CLI-only example resources for prompt assembly testing.
-  --example-tools           Register CLI-only example tools for prompt assembly testing.
-  --model <id>              DeepSeek model id. Defaults to DEEPSEEK_MODEL_ID from .env or.
+  --model <id>              DeepSeek model id. Defaults to DEEPSEEK_MODEL_ID from .env or the built-in default.
   --request-timeout-ms <n>  Provider HTTP request timeout in milliseconds.
   --resources <a,b>         Enable host-registered resources by name.
   --tools <a,b>             Enable registered tools by name. Built-ins are registered by default: read,ls,grep,find,write,edit,bash.

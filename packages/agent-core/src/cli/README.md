@@ -33,7 +33,7 @@ Provider request timeout override:
 
 ```bash
 npm run dev:core -- --request-timeout-ms 600000 "测试较慢请求"
-npm run dev:core -- --agent-playground --request-timeout-ms 600000
+npm run dev:core -- --request-timeout-ms 600000
 ```
 
 Shell environment variables still take precedence over `.env`, and `--model` takes precedence over both.
@@ -73,13 +73,13 @@ This is the closest current equivalent to Pi's `--mode json`: it is single-shot,
 Start an interactive playground for the full AgentRuntime execution path:
 
 ```bash
-npm run dev:core -- --agent-playground
+npm run dev:core
 ```
 
 For local shell testing without a provider key:
 
 ```bash
-npm run dev:core -- --faux --agent-playground
+npm run dev:core -- --faux
 ```
 
 Inside the playground, ordinary input is sent as a prompt to the current runtime session. Slash commands control runtime configuration:
@@ -165,7 +165,7 @@ to remove the saved state. The playground also attempts to restore this file on
 startup and saves after successful or aborted prompt turns. To override the file:
 
 ```bash
-npm run dev:core -- --agent-playground --playground-state-file /tmp/agent-state.json
+npm run dev:core -- --playground-state-file /tmp/agent-state.json
 ```
 
 This mode exercises the whole path: `AgentDefinition -> RuntimeAssembler -> LifecycleRunner -> AgentLoop -> ToolRuntime -> ToolPolicy -> ToolOperations -> EventHub -> ConversationState`.
@@ -337,13 +337,13 @@ The script runs the faux CLI, parses the final exported state, verifies the entr
 
 ## Tools
 
-Enable host-registered tools by comma-separated name. For local prompt assembly testing, the CLI can register example tools:
+Enable host-registered tools by comma-separated name. The CLI agent application loads its local `agent/tools/` definitions by default:
 
 ```bash
-npm run dev:core -- --example-tools --tools inspect_runtime,read_note "使用已注册工具回答"
+npm run dev:core -- --tools inspect_runtime,read_note "使用已注册工具回答"
 ```
 
-The CLI registers built-in tool definitions for local testing. In prompt mode, only names passed through `--tools` are exposed to the model. `--example-tools` adds CLI-only test tools.
+The CLI registers built-in tool definitions and local agent tool definitions for testing. In prompt mode, only names passed through `--tools` are exposed to the model.
 
 ### Direct Tool Execution
 
@@ -365,30 +365,31 @@ Use `--tool-cwd <path>` to choose the ToolOperations root. When omitted, the CLI
 Print registered tool metadata without running the model:
 
 ```bash
-npm run dev:core -- --example-tools --print-tools
+npm run dev:core -- --print-tools
 ```
 
 Limit the printed metadata to selected tools:
 
 ```bash
-npm run dev:core -- --example-tools --tools inspect_runtime,read_note --print-tools
+npm run dev:core -- --tools inspect_runtime,read_note --print-tools
 ```
 
 ## Resources
 
-Enable host-registered resources by comma-separated name. For local prompt assembly testing, the CLI can register example resources:
+Enable host-registered resources by comma-separated name. The CLI agent application loads its local `agent/resources/` definitions by default:
 
 ```bash
-npm run dev:core -- --example-resources --resources runtime_notes,prompt_rules --print-system-prompt
+npm run dev:core -- --resources runtime_notes,prompt_rules --print-system-prompt
 ```
 
-The CLI does not register resources by default. `--example-resources` registers CLI-only static prompt resources and does not affect the core default resource registry.
+`agent/index.ts` owns this loading boundary: it discovers resources, loads the model, and registers tools before handing runtime execution to `agent/main.ts`.
 
 The local playground agent follows the application directory convention:
 
 ```text
 src/cli/agent/
   index.ts
+  main.ts
   resources/
     instructions/
     memory/
@@ -398,18 +399,18 @@ src/cli/agent/
   tools/
 ```
 
-`index.ts` is the agent entry point. `resources/` and `skills/` contain test text resources; `tools/` contains executable example tool definitions and stays outside the ResourceLoader boundary.
+`index.ts` is the agent application entry point for discovery and assembly. `main.ts` is the playground runtime implementation and exposes the run parameter interface. `resources/` and `skills/` contain test text resources; `tools/` contains executable example tool definitions and stays outside the ResourceLoader boundary.
 
 Print registered resource metadata without running the model:
 
 ```bash
-npm run dev:core -- --example-resources --print-resources
+npm run dev:core -- --print-resources
 ```
 
 Limit the printed metadata to selected resources:
 
 ```bash
-npm run dev:core -- --example-resources --resources runtime_notes --print-resources
+npm run dev:core -- --resources runtime_notes --print-resources
 ```
 
 ## System Prompt
@@ -417,7 +418,7 @@ npm run dev:core -- --example-resources --resources runtime_notes --print-resour
 Print the assembled system prompt without running the model:
 
 ```bash
-npm run dev:core -- --example-tools --tools inspect_runtime,read_note,list_capabilities --print-system-prompt
+npm run dev:core -- --tools inspect_runtime,read_note,list_capabilities --print-system-prompt
 ```
 
 Use this to inspect how `ToolCatalog` metadata is rendered into `Available tools` and `Guidelines`, and how `ResourceCatalog` prompt fragments enter the static system prompt.
