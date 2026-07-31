@@ -78,6 +78,7 @@ export type AgentPlaygroundOptions = {
 
 type PlaygroundState = {
   workingDirectory: string;
+  availableToolNames: string[];
   toolNames: string[];
   resourceNames: string[];
   policyEnabled: boolean;
@@ -117,8 +118,6 @@ type PlaygroundRuntimeRecorder = {
   };
 };
 
-const BUILT_IN_TOOL_NAMES = ["read", "ls", "grep", "find", "write", "edit", "bash"];
-
 /**
  * 启动完整 Agent Runtime 交互式 playground。
  *
@@ -148,7 +147,8 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
     const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
     const next = createRuntimeState(options, rl, {
       workingDirectory: state?.workingDirectory ?? workingDirectory,
-      toolNames: state?.toolNames ?? [...(options.initialToolNames ?? BUILT_IN_TOOL_NAMES)],
+      availableToolNames: state?.availableToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
+      toolNames: state?.toolNames ?? [...(options.initialToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name))],
       resourceNames: state?.resourceNames ?? [...(options.initialResourceNames ?? [])],
       policyEnabled: state?.policyEnabled ?? true,
       compactionEnabled: state?.compactionEnabled ?? false,
@@ -441,7 +441,7 @@ async function handleCommand(
       stdout.write(`tools: ${state.toolNames.join(", ") || "(none)"}\n`);
       return true;
     }
-    state.toolNames = parseNameList(value, BUILT_IN_TOOL_NAMES);
+    state.toolNames = parseNameList(value, state.availableToolNames);
     rebuildRuntime(true);
     stdout.write(`tools: ${state.toolNames.join(", ") || "(none)"}\n`);
     return true;

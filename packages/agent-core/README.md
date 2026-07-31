@@ -15,7 +15,7 @@ The tests use a Faux Provider and cover a real Tool-using Agent run plus convers
 Run the development CLI without server or client:
 
 ```bash
-npm run dev:core -- --faux
+npm run dev:core
 ```
 
 Inspect the exported conversation state inside the playground:

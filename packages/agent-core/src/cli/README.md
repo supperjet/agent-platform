@@ -10,28 +10,10 @@ Start the local agent playground:
 npm run dev:core
 ```
 
-Use the faux provider for local shell testing without an API key:
-
-```bash
-npm run dev:core -- --faux
-```
-
-Real provider mode uses DeepSeek and reads the nearest `.env` from the current working directory or its parent directories:
+The current CLI application entry is intentionally small: it always uses the default DeepSeek model and reads the API key from the environment:
 
 ```dotenv
 DEEPSEEK_API_KEY=...
-DEEPSEEK_MODEL_ID=deepseek-v4-flash
-```
-
-Optional startup flags:
-
-```bash
-npm run dev:core -- --model deepseek-v4-flash
-npm run dev:core -- --request-timeout-ms 600000
-npm run dev:core -- --tools read,ls,grep
-npm run dev:core -- --resources runtime_notes,prompt_rules
-npm run dev:core -- --playground-state-file /tmp/agent-state.json
-npm run dev:core -- --playground-compaction-summarizer llm
 ```
 
 ## Application Boundary
@@ -51,11 +33,11 @@ src/cli/agent/
   tools/
 ```
 
-`agent/index.ts` is the application entry point. It loads the model, registers resources, registers tools, and passes those assembled dependencies into `startAgentPlayground`.
+`agent/index.ts` is the application entry point. It loads the default DeepSeek model, registers local resources, creates an empty tool registry, and passes those assembled dependencies into `startAgentPlayground`.
 
 `agent/main.ts` owns the playground runtime loop. Its `AgentPlaygroundOptions` accepts already-assembled runtime dependencies and startup settings; it does not discover resources, load models, or register tools.
 
-`resources/` and `skills/` contain text resources for testing the application layout. `tools/` contains executable tool definitions and stays outside the ResourceLoader boundary.
+`resources/` and `skills/` contain text resources for testing the application layout. `tools/` contains executable tool definitions for later wiring, but the current entry point does not register external tools yet.
 
 ## Playground Commands
 
@@ -63,9 +45,9 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 
 ```text
 /tools                 Show enabled tools.
-/tools all             Enable built-in tools.
+/tools all             Enable all tools registered by the application entry.
 /tools none            Disable all tools.
-/tools read,ls,grep    Enable selected tools.
+/tools read,ls,grep    Enable selected registered tools.
 /policy on|off         Toggle default ToolPolicy.
 /approve ask|always|never
 /events on|off|json    Toggle AgentRuntime and ToolRuntime event printing.
