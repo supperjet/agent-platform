@@ -20,6 +20,7 @@ async function main() {
   const agentDir = resolveAgentDir();
   const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
   const toolRegistry = await new ToolsLoader({ agentDir }).createRegistry();
+
   // 获取模型
   const model = getDeepSeekModel();
 

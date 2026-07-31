@@ -2,10 +2,8 @@ import type { AgentResourceName } from "../definition/agent-definition.js";
 import type { ResolvedAgentDefinition } from "../definition/definition-resolver.js";
 import type {
   LoadedResourceKind,
-  LoadedResourceSnapshot,
   LoadedTextResource,
   ResourceDiagnostic,
-  ResourceLoader
 } from "./resource-loader.js";
 
 /**
@@ -61,8 +59,7 @@ export type ResourceCatalogResolution = {
  *
  * - promptFragments 进入 PromptAssembler。
  * - resourceInfos / diagnostics 可用于 UI、日志和调试。
- * - loadedResources 保留 ResourceLoader 的原始文本资源快照，方便后续 reload 或
- *   inspect。
+ * - loadedResources / diagnostics 预留给上层把 loader 诊断并入 debug surface。
  */
 export type ResourceSnapshot = ResourceCatalogResolution & {
   contextFilePaths: readonly string[];
@@ -124,40 +121,28 @@ export function createDefaultAgentResourceRegistry(): AgentResourceRegistry {
 }
 
 /**
- * ResourceCatalog 负责把“静态 registry 资源”和“ResourceLoader 文件资源”
- * 统一投影成 prompt/debug 可消费的形态。
+ * ResourceCatalog 负责把 ResourceRegistry 投影成 prompt/debug 可消费的形态。
  *
  * 它不读文件、不扫描目录，也不理解工具执行；文件发现属于 ResourceLoader，
- * 可执行能力属于 tools/。
+ * ResourceLoader 会先生成 registry，可执行能力属于 tools/。
  */
 export class ResourceCatalog {
   constructor(
     private readonly registry: AgentResourceRegistry = createDefaultAgentResourceRegistry(),
-    private readonly loader?: ResourceLoader
   ) {}
 
   load(input: ResourceCatalogLoadInput): ResourceSnapshot {
-    // loader 是可选依赖：未注入时保持 v1 的纯 registry 行为。
-    const loaded = this.loader?.load() ?? {
-      resources: [],
-      diagnostics: []
-    };
-    // registry 资源由 AgentDefinition.resourceNames 显式选择；
-    // loader 资源代表当前 agent 应用目录中的文本上下文。
-    const resolution = mergeResourceResolutions(
-      this.resolveForDefinition(input.definition),
-      createLoadedResourceResolution(loaded)
-    );
+    const resolution = this.resolveForDefinition(input.definition);
     return {
       ...resolution,
-      contextFilePaths: loaded.resources.flatMap((resource) =>
-        resource.sourceInfo.path ? [resource.sourceInfo.path] : []
+      contextFilePaths: resolution.entries.flatMap((entry) =>
+        entry.sourceInfo.path ? [entry.sourceInfo.path] : []
       ),
-      skillNames: loaded.resources.flatMap((resource) =>
-        resource.kind === "skill" ? [resource.name] : []
+      skillNames: resolution.entries.flatMap((entry) =>
+        entry.kind === "skill" ? [entry.name] : []
       ),
-      loadedResources: loaded.resources,
-      diagnostics: loaded.diagnostics
+      loadedResources: [],
+      diagnostics: []
     };
   }
 
@@ -234,88 +219,6 @@ function toResourceInfo(entry: ResourceCatalogEntry): ResourceCatalogResourceInf
     ...(entry.kind ? { kind: entry.kind } : {}),
     sourceInfo: entry.sourceInfo
   };
-}
-
-function createLoadedResourceResolution(
-  loaded: LoadedResourceSnapshot
-): ResourceCatalogResolution {
-  // skill 和 prompt-template 需要后续模块按需激活，不能在发现阶段直接塞进上下文。
-  const entries = loaded.resources
-    .filter(shouldInjectLoadedResource)
-    .map(createLoadedResourceCatalogEntry);
-  return {
-    resourceNames: entries.map((entry) => entry.name),
-    entries,
-    resourceInfos: entries.map(toResourceInfo),
-    promptFragments: entries.map((entry) => entry.promptFragment)
-  };
-}
-
-function shouldInjectLoadedResource(resource: LoadedTextResource): boolean {
-  return resource.kind !== "prompt-template" && resource.kind !== "skill";
-}
-
-/** 把文件资源转换成 Catalog 条目，并为不同 kind 包上清晰的 prompt 边界。 */
-function createLoadedResourceCatalogEntry(
-  resource: LoadedTextResource
-): ResourceCatalogEntry {
-  return {
-    name: normalizeSingleResourceName("LoadedTextResource.name", resource.name),
-    label: normalizeResourceText(`LoadedTextResource.${resource.name}.label`, resource.label),
-    kind: resource.kind,
-    promptFragment: formatLoadedResourcePromptFragment(resource),
-    sourceInfo: {
-      source: resource.sourceInfo.source,
-      label: normalizeResourceText(`LoadedTextResource.${resource.name}.sourceInfo.label`, resource.sourceInfo.label),
-      ...(resource.sourceInfo.path ? { path: resource.sourceInfo.path } : {}),
-      scope: resource.sourceInfo.scope
-    }
-  };
-}
-
-function mergeResourceResolutions(
-  registryResolution: ResourceCatalogResolution,
-  loadedResolution: ResourceCatalogResolution
-): ResourceCatalogResolution {
-  // registry 在前，loader 在后：显式定义先出现，workspace 上下文随后补充。
-  return {
-    resourceNames: [
-      ...registryResolution.resourceNames,
-      ...loadedResolution.resourceNames
-    ],
-    entries: [
-      ...registryResolution.entries,
-      ...loadedResolution.entries
-    ],
-    resourceInfos: [
-      ...registryResolution.resourceInfos,
-      ...loadedResolution.resourceInfos
-    ],
-    promptFragments: [
-      ...registryResolution.promptFragments,
-      ...loadedResolution.promptFragments
-    ]
-  };
-}
-
-function formatLoadedResourcePromptFragment(resource: LoadedTextResource): string {
-  const sourcePath = resource.sourceInfo.path ?? resource.sourceInfo.label;
-  switch (resource.kind) {
-    case "instruction":
-      return `<project_instructions source="${sourcePath}">\n${resource.content}\n</project_instructions>`;
-    case "memory":
-      return `<memory_context source="${sourcePath}">\n${resource.content}\n</memory_context>`;
-    case "reference":
-      return `<reference_context source="${sourcePath}">\n${resource.content}\n</reference_context>`;
-    case "system-prompt":
-      return resource.content;
-    case "append-system-prompt":
-      return resource.content;
-    case "prompt-template":
-    case "skill":
-      // shouldInjectLoadedResource 已经拦截，这里保留穷尽保护，防止未来误接线。
-      throw new Error(`Loaded resource kind "${resource.kind}" is not directly injectable.`);
-  }
 }
 
 function normalizeResourceNames(names: readonly AgentResourceName[]): readonly AgentResourceName[] {

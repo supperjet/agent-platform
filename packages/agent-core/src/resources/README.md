@@ -34,18 +34,14 @@ sandbox 和观测语义，必须走 `tools/` 下的 `ToolRegistry`、`ToolCatalo
 
 ### ResourceCatalog
 
-`ResourceCatalog` 把两类资源统一投影：
-
-- `AgentResourceRegistry` 中的静态 registry resources。
-- `ResourceLoader` 发现的 workspace text resources。
+`ResourceCatalog` 只消费 `AgentResourceRegistry`。文件发现已经在
+`ResourceLoader({ agentDir }).createRegistry()` 阶段完成。
 
 Catalog 负责：
 
 - 校验 resource name。
-- 合并 registry 与 loader 资源。
 - 输出 `promptFragments` 给 `PromptAssembler`。
 - 输出 `resourceInfos`、`contextFilePaths`、`skillNames`、`diagnostics` 给调试和 UI。
-- 给 `instruction` / `memory` / `reference` 等资源加清晰 prompt 边界。
 
 Catalog 不负责文件扫描；文件扫描只属于 `ResourceLoader`。
 
@@ -109,12 +105,13 @@ agent/
 | `resources/prompt-templates/` | `prompt-template` | 否 |
 | `skills/` | `skill` | 否 |
 
-`prompt-template` 和 `skill` 被发现后会进入 `loadedResources` / `skillNames` 等
-诊断投影，但不会在发现阶段直接变成 prompt fragment。
+`prompt-template` 和 `skill` 会被 `ResourceLoader.load()` 发现，但
+`createRegistry()` 不会把它们注册成直接注入 prompt 的资源。后续选择与展开应由
+Skill / Prompt Template 模块处理。
 
 ## Prompt 边界
 
-`ResourceCatalog` 会给可直接注入的文件资源包上边界：
+`ResourceLoader.createRegistry()` 会给可直接注入的文件资源包上边界：
 
 ```xml
 <project_instructions source="...">

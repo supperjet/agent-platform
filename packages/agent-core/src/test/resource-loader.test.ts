@@ -154,20 +154,22 @@ test("ResourceCatalog injects loaded context resources without treating skills o
       promptFragment: "Runtime notes from registry.",
       sourceInfo: { source: "sdk", label: "test" }
     });
-    const catalog = new ResourceCatalog(
-      createAgentResourceRegistry([registryResource]),
-      new ResourceLoader({
-        agentDir,
-        now: () => new Date("2026-07-31T00:00:00.000Z")
-      })
-    );
+    const loadedRegistry = new ResourceLoader({
+      agentDir,
+      now: () => new Date("2026-07-31T00:00:00.000Z")
+    }).createRegistry();
+    const resources = [
+      registryResource,
+      ...loadedRegistry.getAllDefinitions()
+    ];
+    const catalog = new ResourceCatalog(createAgentResourceRegistry(resources));
 
     const definition = new DefinitionResolver().resolve(formatAgentDefinition({
       id: "resource-loader-agent",
       model: registration.getModel(),
       instructions: ["Use loaded resources."],
       toolNames: [],
-      resourceNames: ["runtime_notes"]
+      resourceNames: resources.map((resource) => resource.name)
     }));
 
     const snapshot = catalog.load({
@@ -196,8 +198,12 @@ test("ResourceCatalog injects loaded context resources without treating skills o
       { name: "instruction:resources/instructions/AGENTS", kind: "instruction" },
       { name: "memory:resources/memory/MEMORY", kind: "memory" }
     ]);
-    assert.deepEqual(snapshot.skillNames, ["skill:skills/review/SKILL"]);
-    assert.equal(snapshot.loadedResources.length, 4);
+    assert.deepEqual(snapshot.contextFilePaths, [
+      join(agentDir, "resources/instructions/AGENTS.md"),
+      join(agentDir, "resources/memory/MEMORY.md")
+    ]);
+    assert.deepEqual(snapshot.skillNames, []);
+    assert.equal(snapshot.loadedResources.length, 0);
     assert.deepEqual(snapshot.diagnostics, []);
   } finally {
     registration.unregister();
@@ -205,18 +211,19 @@ test("ResourceCatalog injects loaded context resources without treating skills o
   }
 });
 
-test("RuntimeAssembler accepts a resource loader as the text resource discovery path", () => {
+test("RuntimeAssembler accepts a resource registry created from the resource loader", () => {
   const registration = registerFauxProvider({ provider: "resource-loader-assembler-test" });
   const agentDir = createTempAgentDir();
   try {
     writeResource(agentDir, "resources/instructions/AGENTS.md", "Use the project convention.");
     writeResource(agentDir, "resources/memory/MEMORY.md", "The project chose file-backed memory v1.");
     writeResource(agentDir, "tools/ignored.ts", "export const ignored = true;");
+    const resourceRegistry = new ResourceLoader({
+      agentDir,
+      now: () => new Date("2026-07-31T00:00:00.000Z")
+    }).createRegistry();
     const assembler = new RuntimeAssembler({
-      resourceLoader: new ResourceLoader({
-        agentDir,
-        now: () => new Date("2026-07-31T00:00:00.000Z")
-      })
+      resourceRegistry
     });
 
     const assembly = assembler.assemble({
@@ -225,7 +232,8 @@ test("RuntimeAssembler accepts a resource loader as the text resource discovery 
         id: "resource-loader-assembly-agent",
         model: registration.getModel(),
         instructions: ["Assemble text resources."],
-        toolNames: []
+        toolNames: [],
+        resourceNames: resourceRegistry.getAllDefinitions().map((resource) => resource.name)
       }),
       resolveApiKey: () => "resource-loader-key"
     });
@@ -245,7 +253,11 @@ test("RuntimeAssembler accepts a resource loader as the text resource discovery 
         ].join("\n")
       ].join("\n\n")
     );
-    assert.equal(assembly.resources.loadedResources.length, 2);
+    assert.deepEqual(assembly.resources.contextFilePaths, [
+      join(agentDir, "resources/instructions/AGENTS.md"),
+      join(agentDir, "resources/memory/MEMORY.md")
+    ]);
+    assert.equal(assembly.resources.loadedResources.length, 0);
   } finally {
     registration.unregister();
     rmSync(agentDir, { recursive: true, force: true });
