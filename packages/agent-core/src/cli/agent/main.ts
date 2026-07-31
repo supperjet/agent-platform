@@ -24,6 +24,7 @@ import {
   type LifecycleHooks,
 } from "../../index.js";
 import type { AgentResourceRegistry } from "../../resources/resource-catalog.js";
+import type { ResourceLoader } from "../../resources/resource-loader.js";
 import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
@@ -66,14 +67,10 @@ export type AgentPlaygroundOptions = {
   model: AgentModel;
   resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
   resourceRegistry: AgentResourceRegistry;
+  resourceLoader?: ResourceLoader;
   toolRegistry: AgentToolRegistry;
   workingDirectory?: string;
-  initialToolNames?: readonly string[];
-  initialResourceNames?: readonly string[];
-  initialCompactionSummarizer?: CompactionSummarizerMode;
-  requestTimeoutMs?: number;
-  stateFile?: string;
-  json?: boolean;
+  conversationFile?: string;
 };
 
 type PlaygroundState = {
@@ -91,7 +88,7 @@ type PlaygroundState = {
   runtime: AgentRuntime;
   lastSystemPrompt: string;
   localStore: LocalConversationStateStore;
-  stateFile: string;
+  conversationFile: string;
   runStore: InMemoryRunStore;
   eventStore: InMemoryEventStore;
   runtimeStateStore: InMemoryRuntimeStateStore;
@@ -133,8 +130,8 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   let state: PlaygroundState | undefined;
 
   const workingDirectory = options.workingDirectory ?? process.cwd();
-  const stateFile = options.stateFile ?? resolvePlaygroundStateFile(workingDirectory);
-  const localStore = new LocalConversationStateStore({ stateFile });
+  const conversationFile = options.conversationFile ?? resolvePlaygroundConversationFile(workingDirectory);
+  const localStore = new LocalConversationStateStore({ stateFile: conversationFile });
   const runStore = new InMemoryRunStore();
   const eventStore = new InMemoryEventStore();
   const runtimeStateStore = new InMemoryRuntimeStateStore();
@@ -148,17 +145,17 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
     const next = createRuntimeState(options, rl, {
       workingDirectory: state?.workingDirectory ?? workingDirectory,
       availableToolNames: state?.availableToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
-      toolNames: state?.toolNames ?? [...(options.initialToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name))],
-      resourceNames: state?.resourceNames ?? [...(options.initialResourceNames ?? [])],
+      toolNames: state?.toolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
+      resourceNames: state?.resourceNames ?? options.resourceRegistry.getAllDefinitions().map((resource) => resource.name),
       policyEnabled: state?.policyEnabled ?? true,
       compactionEnabled: state?.compactionEnabled ?? false,
       compactionProtectLastMessages: state?.compactionProtectLastMessages ?? 6,
-      compactionSummarizerMode: state?.compactionSummarizerMode ?? options.initialCompactionSummarizer ?? "fallback",
+      compactionSummarizerMode: state?.compactionSummarizerMode ?? "llm",
       approvalMode: state?.approvalMode ?? "ask",
-      eventMode: state?.eventMode ?? (options.json ? "json" : "on"),
+      eventMode: state?.eventMode ?? "on",
       lifecycleMode: state?.lifecycleMode ?? "off",
       localStore,
-      stateFile,
+      conversationFile,
       runStore: state?.runStore ?? runStore,
       eventStore: state?.eventStore ?? eventStore,
       runtimeStateStore: state?.runtimeStateStore ?? runtimeStateStore,
@@ -175,9 +172,9 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   await saveRuntimeSnapshot(state!, "idle", "clean");
   printIntro(state);
   if (restoredFile) {
-    stdout.write(`restored: ${stateFile}\n`);
+    stdout.write(`restored conversation file: ${conversationFile}\n`);
   } else {
-    stdout.write(`state file: ${stateFile}\n`);
+    stdout.write(`conversation file: ${conversationFile}\n`);
   }
 
   const lines = rl[Symbol.asyncIterator]();
@@ -260,6 +257,7 @@ function createRuntimeState(
   const factory = new PiAgentRuntimeFactory({
     definition,
     resourceRegistry: options.resourceRegistry,
+    ...(options.resourceLoader ? { resourceLoader: options.resourceLoader } : {}),
     toolRegistry: options.toolRegistry,
     toolRuntime,
     lifecycleHooks,
@@ -283,11 +281,9 @@ function createRuntimeState(
           resolveApiKey: options.resolveApiKey,
           outputFormat: "structured-json",
           ...resolvePlaygroundSummarizerInputBudget(options.model),
-          ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
         }),
       }
       : {}),
-    ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
   });
   const runtime = factory.create("agent-core-playground", conversationState);
   runtime.subscribe((event) => {
@@ -505,11 +501,11 @@ async function handleCommand(
   }
   if (command === "delete") {
     const deleted = await state.localStore.delete();
-    stdout.write(deleted ? `deleted: ${state.stateFile}\n` : `not found: ${state.stateFile}\n`);
+    stdout.write(deleted ? `deleted: ${state.conversationFile}\n` : `not found: ${state.conversationFile}\n`);
     return true;
   }
   if (command === "storage") {
-    stdout.write(`state file: ${state.stateFile}\n`);
+    stdout.write(`conversation file: ${state.conversationFile}\n`);
     return true;
   }
   if (command === "context") {
@@ -545,6 +541,7 @@ function createSystemPromptPreview(
 ) {
   const assembly = new RuntimeAssembler({
     resourceRegistry,
+    ...(options.resourceLoader ? { resourceLoader: options.resourceLoader } : {}),
     toolRegistry,
     services: { toolRuntime, lifecycleHooks },
   }).assemble({
@@ -841,7 +838,7 @@ async function savePlaygroundState(state: PlaygroundState) {
       modelId: state.runtime.snapshot().modelId
     }
   });
-  return state.stateFile;
+  return state.conversationFile;
 }
 
 function isRequiredRuntimeEvent(event: AgentRuntimeEvent) {
@@ -854,7 +851,7 @@ function isRequiredRuntimeEvent(event: AgentRuntimeEvent) {
     || event.type === "tool_finished";
 }
 
-function resolvePlaygroundStateFile(cwd: string) {
+function resolvePlaygroundConversationFile(cwd: string) {
   return join(resolve(cwd), ".agent-platform", "playground", "sessions", "agent-core-playground", "state.json");
 }
 
@@ -1012,9 +1009,9 @@ function printIntro(state: PlaygroundState | undefined) {
 function printHelp() {
   stdout.write(`Commands:
   /tools                 Show enabled tools.
-  /tools all             Enable built-in tools.
+  /tools all             Enable all registered tools.
   /tools none            Disable all tools.
-  /tools read,ls,grep    Enable selected tools.
+  /tools inspect_runtime Enable selected registered tools.
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.
@@ -1034,7 +1031,7 @@ function printHelp() {
   /state                 Print exported conversation state.
   /save                  Save conversation state to local storage.
   /delete                Delete the saved local conversation state.
-  /storage               Print the local state file path.
+  /storage               Print the local conversation file path.
   /context               Print the last assembled prompt context.
   /snapshot              Print runtime snapshot.
   /system                Print current assembled system prompt.

@@ -952,7 +952,8 @@ state commit 失败会返回 `commit_failed` outcome 并尽力把 session 标记
 目标：为本地长期会话和 playground/CLI 验证提供最小可用持久化。
 
 当前状态：已完成第一版。新增本地 JSON snapshot store，`agent-core` 的
-store 只接收显式 `stateFile`，不内置 `.agent-platform` 路径策略；
+store 只接收显式文件路径，当前底层字段仍叫 `stateFile`，但 playground 对外
+命名为 `conversationFile`，不内置 `.agent-platform` 路径策略；
 playground composition 负责把默认路径解析为
 `<cwd>/.agent-platform/playground/sessions/agent-core-playground/state.json`。
 playground 启动时会尝试恢复该文件，prompt 成功或 abort 后会自动保存，并
@@ -960,24 +961,24 @@ playground 启动时会尝试恢复该文件，prompt 成功或 abort 后会自�
 
 工作项：
 
-- 定义 local state file 格式和默认目录策略。已完成第一版：
-  state file 使用 JSON object，包含 `formatVersion: 1`、`sessionId`、
+- 定义 local conversation file 格式和默认目录策略。已完成第一版：
+  conversation file 使用 JSON object，包含 `formatVersion: 1`、`sessionId`、
   `updatedAt`、`agentState` 和可选 `sessionInfo`；默认目录策略只放在
   playground 层。
 - 实现 atomic write：临时文件写入成功后 rename 替换正式 state。已完成。
 - 提供本地 state load/save/delete adapter。已完成。
 - 为 playground 添加保存和删除命令。已完成，另有 `/storage` 查看路径。
-- 提供显式 state file 覆盖入口。已完成：
-  `--playground-state-file <path>`。
+- 提供显式 conversation file 覆盖入口。已完成：
+  playground 对外使用 `AgentPlaygroundOptions.conversationFile`。
 
 验收：
 
 - 本地 JSON state 可以保存、恢复和删除。已覆盖。
-- 不存在 state file 时恢复返回空，不阻止 playground 启动。已覆盖。
+- 不存在 conversation file 时恢复返回空，不阻止 playground 启动。已覆盖。
 - 不支持旧 conversation schema 的本地文件会被拒绝。已覆盖。
 - playground 本地路径策略不污染 `agent-core` 的 conversation state schema。
 - 处理 corrupted JSON、version mismatch、权限错误和磁盘满。
-- playground 支持显式 `/save` / `/load`，或启动参数绑定 state file。
+- playground 支持显式 `/save` / `/storage`，或通过 `conversationFile` 绑定文件。
 - CLI 支持 `--state-in` / `--state-out`，默认不隐式写用户目录。
 
 验收：
@@ -1544,7 +1545,7 @@ agent/
 ```
 
 - `agent/index.ts` 是 agent 应用入口和 composition root，只声明 definition、
-  model、启用资源、启用 skills、启用 tools、policies 和 runtime options。
+  model、资源注册/发现、工具注册/发现、policies 和 runtime options。
   它不直接承载大量 prompt/resource/tool 实现细节。
 - `agent/resources/` 只放可序列化、可审计、无执行闭包的文本资源。目录名可以
   推断默认 `LoadedResourceKind`，文件 frontmatter 或显式配置可以覆盖 metadata。
@@ -1557,6 +1558,20 @@ agent/
   但 skill 选择、展开和激活上下文由后续 Skill 模块负责。
 - `agent/tools/` 放可执行工具定义，只进入 ToolRegistry / ToolCatalog /
   ToolRuntime，不进入 ResourceLoader / ResourceCatalog。
+
+注册与发现约束：
+
+- Resource 支持两条入口：`createAgentResourceRegistry(...)` 手动注册，以及
+  `AgentAppResourceLoader({ agentDir })` 按目录结构自动发现文本资源。
+- Tool 也应支持两条入口：`createAgentToolRegistry(...)` 手动注册，以及后续
+  ToolLoader 按 `agent/tools/` 自动发现工具定义。
+- ToolLoader 不能复用 ResourceLoader；ResourceLoader 的产物必须保持可序列化、
+  可审计、无执行闭包，而工具定义天然包含 `execute`。
+- `initialToolNames` / `initialResourceNames` 这类“启动时启用列表”暂不进入
+  `AgentPlaygroundOptions`。资源和工具的启用/禁用需要后续单独设计，避免注册、
+  发现和激活三个概念混在一起。
+- `AgentPlaygroundOptions` 对外只保留装配依赖和 `conversationFile`。compaction
+  summarizer 默认使用 LLM；`requestTimeoutMs`、`json` 这类调试启动参数先移除。
 
 任务流程：
 
