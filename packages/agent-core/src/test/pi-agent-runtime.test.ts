@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,31 +257,36 @@ test("characterizes runtime events, snapshot, and exported state", async () => {
 
 test("prints entry graph state from the CLI", () => {
   const cli = createCliInvocation();
-  const result = spawnSync(cli.command, [
-    ...cli.args,
-    "--faux",
-    "--json",
-    "--print-state",
-    "cli graph test"
-  ], {
-    encoding: "utf8"
-  });
+  const root = mkdtempSync(join(tmpdir(), "agent-core-cli-graph-"));
+  try {
+    const stateFile = join(root, "state.json");
+    const result = spawnSync(cli.command, [
+      ...cli.args,
+      "--faux",
+      "--playground-state-file",
+      stateFile
+    ], {
+      encoding: "utf8",
+      input: ["cli graph test", "/exit", ""].join("\n")
+    });
 
-  assert.equal(result.status, 0, result.stderr);
-  const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
-  const state = JSON.parse(lines.at(-1) ?? "null");
+    assert.equal(result.status, 0, result.stderr);
+    const state = JSON.parse(readFileSync(stateFile, "utf8")).agentState;
 
-  assert.equal(state.schemaVersion, 2);
-  assert.ok(state.payload && typeof state.payload === "object");
-  assert.ok(Array.isArray(state.payload.entries));
-  assert.equal("messages" in state.payload, false);
-  assert.equal(state.payload.leafId, state.payload.entries.at(-1)?.id);
-  assert.deepEqual(
-    (state.payload.entries as ConversationEntry[]).map((entry) =>
-      readEntryMessage(entry).role
-    ),
-    ["user", "assistant"]
-  );
+    assert.equal(state.schemaVersion, 2);
+    assert.ok(state.payload && typeof state.payload === "object");
+    assert.ok(Array.isArray(state.payload.entries));
+    assert.equal("messages" in state.payload, false);
+    assert.equal(state.payload.leafId, state.payload.entries.at(-1)?.id);
+    assert.deepEqual(
+      (state.payload.entries as ConversationEntry[]).map((entry) =>
+        readEntryMessage(entry).role
+      ),
+      ["user", "assistant"]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("prints playground run and event store records", () => {
@@ -293,7 +298,6 @@ test("prints playground run and event store records", () => {
       "--faux",
       "--faux-response",
       "playground answer",
-      "--agent-playground",
       "--playground-state-file",
       join(root, "state.json")
     ], {
@@ -330,7 +334,6 @@ test("playground uses one compact command for manual and automatic compaction", 
       "--faux",
       "--faux-response",
       "compact playground answer",
-      "--agent-playground",
       "--playground-state-file",
       join(root, "state.json")
     ], {
@@ -378,7 +381,6 @@ test("playground can use the LLM conversation summarizer for compaction", () => 
         currentTaskState: [],
         risks: [],
       }),
-      "--agent-playground",
       "--playground-state-file",
       join(root, "state.json")
     ], {
@@ -408,12 +410,12 @@ function createCliInvocation() {
   if (currentFile.includes("/src/")) {
     return {
       command: process.execPath,
-      args: ["--import", "tsx", resolve(testDirectory, "../cli/run-agent-core.ts")]
+      args: ["--import", "tsx", resolve(testDirectory, "../cli/agent/index.ts")]
     };
   }
   return {
     command: process.execPath,
-    args: [resolve(testDirectory, "../cli/run-agent-core.js")]
+    args: [resolve(testDirectory, "../cli/agent/index.js")]
   };
 }
 

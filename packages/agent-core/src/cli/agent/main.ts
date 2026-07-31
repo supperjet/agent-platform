@@ -3,12 +3,8 @@ import { stdin, stderr, stdout } from "node:process";
 import { createInterface, type Interface } from "node:readline/promises";
 import type { AgentModel, AgentRuntime, AgentRuntimeCommand } from "../../contracts.js";
 import {
-  createAgentResourceRegistry,
-  createAgentToolRegistry,
-  createBuiltInToolDefinitions,
   createDefaultToolPolicy,
   createLifecycleRunner,
-  createLocalToolOperations,
   InMemoryEventStore,
   InMemoryRuntimeLogStore,
   InMemoryRuntimeStateStore,
@@ -27,8 +23,8 @@ import {
   type AgentRuntimeStateSnapshot,
   type LifecycleHooks,
 } from "../../index.js";
-import type { AgentResourceDefinition } from "../../resources/resource-catalog.js";
-import type { AnyAgentToolDefinition } from "../../tools/tool-registry.js";
+import type { AgentResourceRegistry } from "../../resources/resource-catalog.js";
+import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
 } from "../../tools/policy/index.js";
@@ -53,7 +49,6 @@ const PLAYGROUND_COMMANDS = new Set([
   "runtimelog",
   "compact",
   "lifecycle",
-  "cwd",
   "runs",
   "state",
   "save",
@@ -70,9 +65,9 @@ const PLAYGROUND_COMMANDS = new Set([
 export type AgentPlaygroundOptions = {
   model: AgentModel;
   resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
-  resources: readonly AgentResourceDefinition[];
-  tools: readonly AnyAgentToolDefinition[];
-  initialCwd: string;
+  resourceRegistry: AgentResourceRegistry;
+  toolRegistry: AgentToolRegistry;
+  workingDirectory?: string;
   initialToolNames?: readonly string[];
   initialResourceNames?: readonly string[];
   initialCompactionSummarizer?: CompactionSummarizerMode;
@@ -82,7 +77,7 @@ export type AgentPlaygroundOptions = {
 };
 
 type PlaygroundState = {
-  cwd: string;
+  workingDirectory: string;
   toolNames: string[];
   resourceNames: string[];
   policyEnabled: boolean;
@@ -138,7 +133,8 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
 
   let state: PlaygroundState | undefined;
 
-  const stateFile = options.stateFile ?? resolvePlaygroundStateFile(options.initialCwd);
+  const workingDirectory = options.workingDirectory ?? process.cwd();
+  const stateFile = options.stateFile ?? resolvePlaygroundStateFile(workingDirectory);
   const localStore = new LocalConversationStateStore({ stateFile });
   const runStore = new InMemoryRunStore();
   const eventStore = new InMemoryEventStore();
@@ -151,7 +147,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
     const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
     const next = createRuntimeState(options, rl, {
-      cwd: state?.cwd ?? options.initialCwd,
+      workingDirectory: state?.workingDirectory ?? workingDirectory,
       toolNames: state?.toolNames ?? [...(options.initialToolNames ?? BUILT_IN_TOOL_NAMES)],
       resourceNames: state?.resourceNames ?? [...(options.initialResourceNames ?? [])],
       policyEnabled: state?.policyEnabled ?? true,
@@ -242,12 +238,6 @@ function createRuntimeState(
   config: Omit<PlaygroundState, "runtime" | "lastSystemPrompt">,
   conversationState?: ReturnType<AgentRuntime["exportState"]>,
 ): PlaygroundState {
-  const toolOperations = createLocalToolOperations({ cwd: config.cwd });
-  const toolRegistry = createAgentToolRegistry([
-    ...createBuiltInToolDefinitions(toolOperations),
-    ...options.tools,
-  ]);
-  const resourceRegistry = createAgentResourceRegistry(options.resources);
   const definition = formatAgentDefinition({
     id: "agent-core-playground",
     model: options.model,
@@ -269,8 +259,8 @@ function createRuntimeState(
   });
   const factory = new PiAgentRuntimeFactory({
     definition,
-    resourceRegistry,
-    toolRegistry,
+    resourceRegistry: options.resourceRegistry,
+    toolRegistry: options.toolRegistry,
     toolRuntime,
     lifecycleHooks,
     policies: {
@@ -308,7 +298,7 @@ function createRuntimeState(
   return {
     ...config,
     runtime,
-    lastSystemPrompt: createSystemPromptPreview(options, definition, resourceRegistry, toolRegistry, toolRuntime, lifecycleHooks),
+    lastSystemPrompt: createSystemPromptPreview(options, definition, options.resourceRegistry, options.toolRegistry, toolRuntime, lifecycleHooks),
   };
 }
 
@@ -500,16 +490,6 @@ async function handleCommand(
     stdout.write(`lifecycle: ${state.lifecycleMode}\n`);
     return true;
   }
-  if (command === "cwd") {
-    if (!value) {
-      stdout.write(`cwd: ${state.cwd}\n`);
-      return true;
-    }
-    state.cwd = resolve(value);
-    rebuildRuntime(true);
-    stdout.write(`cwd: ${state.cwd}\n`);
-    return true;
-  }
   if (command === "runs") {
     await printStoredRuns(state);
     return true;
@@ -558,8 +538,8 @@ async function handleCommand(
 function createSystemPromptPreview(
   options: AgentPlaygroundOptions,
   definition: ReturnType<typeof formatAgentDefinition>,
-  resourceRegistry: ReturnType<typeof createAgentResourceRegistry>,
-  toolRegistry: ReturnType<typeof createAgentToolRegistry>,
+  resourceRegistry: AgentResourceRegistry,
+  toolRegistry: AgentToolRegistry,
   toolRuntime: ReturnType<typeof createToolRuntime>,
   lifecycleHooks: LifecycleHooks,
 ) {
@@ -857,7 +837,7 @@ async function savePlaygroundState(state: PlaygroundState) {
     sessionId: "agent-core-playground",
     agentState: state.runtime.exportState(),
     sessionInfo: {
-      cwd: state.cwd,
+      cwd: state.workingDirectory,
       modelId: state.runtime.snapshot().modelId
     }
   });
@@ -1022,7 +1002,7 @@ function printIntro(state: PlaygroundState | undefined) {
   stdout.write("Agent Runtime Playground\n");
   stdout.write("Type /help for commands, /exit to quit.\n");
   if (state) {
-    stdout.write(`cwd: ${state.cwd}\n`);
+    stdout.write(`cwd: ${state.workingDirectory}\n`);
     stdout.write(`tools: ${state.toolNames.join(", ")}\n`);
     stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}, lifecycle: ${state.lifecycleMode}\n`);
     stdout.write(formatCompactStatus(state));
@@ -1050,7 +1030,6 @@ function printHelp() {
   /compact summarizer llm|fallback
                          Choose LLM-driven or deterministic fallback summaries.
   /lifecycle on|off|json Toggle LifecycleRunner hook logging.
-  /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
   /runs                  Print stored RunStore records.
   /state                 Print exported conversation state.
   /save                  Save conversation state to local storage.

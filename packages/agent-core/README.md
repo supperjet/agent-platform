@@ -15,13 +15,13 @@ The tests use a Faux Provider and cover a real Tool-using Agent run plus convers
 Run the development CLI without server or client:
 
 ```bash
-npm run dev:core -- --faux "测试运行链路"
+npm run dev:core -- --faux
 ```
 
-Inspect the exported conversation state from the CLI:
+Inspect the exported conversation state inside the playground:
 
-```bash
-npm run dev:core -- --faux --json --print-state "测试 conversation graph"
+```text
+/state
 ```
 
 Run the Conversation v1 smoke check:
