@@ -24,7 +24,6 @@ import {
   type LifecycleHooks,
 } from "../../index.js";
 import type { AgentResourceRegistry } from "../../resources/resource-catalog.js";
-import type { ResourceLoader } from "../../resources/resource-loader.js";
 import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
@@ -67,7 +66,6 @@ export type AgentPlaygroundOptions = {
   model: AgentModel;
   resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
   resourceRegistry: AgentResourceRegistry;
-  resourceLoader?: ResourceLoader;
   toolRegistry: AgentToolRegistry;
   workingDirectory?: string;
   conversationFile?: string;
@@ -257,7 +255,6 @@ function createRuntimeState(
   const factory = new PiAgentRuntimeFactory({
     definition,
     resourceRegistry: options.resourceRegistry,
-    ...(options.resourceLoader ? { resourceLoader: options.resourceLoader } : {}),
     toolRegistry: options.toolRegistry,
     toolRuntime,
     lifecycleHooks,
@@ -541,7 +538,6 @@ function createSystemPromptPreview(
 ) {
   const assembly = new RuntimeAssembler({
     resourceRegistry,
-    ...(options.resourceLoader ? { resourceLoader: options.resourceLoader } : {}),
     toolRegistry,
     services: { toolRuntime, lifecycleHooks },
   }).assemble({

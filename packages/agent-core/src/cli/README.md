@@ -33,16 +33,17 @@ src/cli/agent/
   tools/
 ```
 
-`agent/index.ts` is the application entry point. It loads the default DeepSeek model, creates an empty manual resource registry, discovers file-backed resources through `AgentAppResourceLoader`, creates an empty tool registry, and passes those assembled dependencies into `startAgentPlayground`.
+`agent/index.ts` is the application entry point. It loads the default DeepSeek model, creates a `ResourceLoader` and a `ToolsLoader` for the agent directory, and passes the generated registries into `startAgentPlayground`.
 
 `agent/main.ts` owns the playground runtime loop. Its `AgentPlaygroundOptions` accepts already-assembled runtime dependencies and the optional `conversationFile`; it does not discover resources, load models, or register tools.
 
-`resources/` and `skills/` contain text resources for testing the application layout. `tools/` contains executable tool definitions for later wiring, but the current entry point does not register external tools yet.
+`resources/` and `skills/` contain text resources for testing the application layout. `tools/` contains executable tool definitions exported from `tools/index.ts`.
 
-Manual and discovered loading are separate paths:
+Loader and registry responsibilities are separate:
 
-- Resources can be registered manually with `createAgentResourceRegistry(...)` and discovered from the agent directory with `AgentAppResourceLoader`.
-- Tools can be registered manually with `createAgentToolRegistry(...)`. Directory-based tool discovery belongs to a later ToolLoader path, not to ResourceLoader.
+- `ResourceLoader({ agentDir }).createRegistry()` discovers text resources and creates the resource registry.
+- `ToolsLoader({ agentDir }).createRegistry()` imports `tools/index.js` and creates the tool registry.
+- `startAgentPlayground` receives registries only; it does not expose loader parameters.
 
 ## Playground Commands
 

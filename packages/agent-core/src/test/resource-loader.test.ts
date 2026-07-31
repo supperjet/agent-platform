@@ -11,10 +11,11 @@ import {
   createAgentResourceRegistry,
   defineAgentResource
 } from "../resources/resource-catalog.js";
-import { AgentAppResourceLoader } from "../resources/resource-loader.js";
+import { ResourceLoader } from "../resources/resource-loader.js";
 import { RuntimeAssembler } from "../runtime/runtime-assembler.js";
+import { ToolsLoader } from "../tools/tool-loader.js";
 
-test("AgentAppResourceLoader discovers text resources by agent directory convention", () => {
+test("ResourceLoader discovers text resources by agent directory convention", () => {
   const agentDir = createTempAgentDir();
   try {
     writeResource(agentDir, "resources/instructions/AGENTS.md", "Use two-space indentation.");
@@ -24,7 +25,7 @@ test("AgentAppResourceLoader discovers text resources by agent directory convent
     writeResource(agentDir, "skills/debugging/SKILL.md", "Debug with a narrow reproduction.");
     writeResource(agentDir, "tools/query.ts", "export const query = () => undefined;");
 
-    const loader = new AgentAppResourceLoader({
+    const loader = new ResourceLoader({
       agentDir,
       now: () => new Date("2026-07-31T00:00:00.000Z")
     });
@@ -81,6 +82,64 @@ test("AgentAppResourceLoader discovers text resources by agent directory convent
   }
 });
 
+test("ResourceLoader creates a registry from directly injectable text resources", () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeResource(agentDir, "resources/instructions/AGENTS.md", "Follow project rules.");
+    writeResource(agentDir, "resources/memory/MEMORY.md", "Remember project decisions.");
+    writeResource(agentDir, "resources/prompt-templates/plan.md", "Make a plan.");
+    writeResource(agentDir, "skills/review/SKILL.md", "Review carefully.");
+
+    const registry = new ResourceLoader({
+      agentDir,
+      now: () => new Date("2026-07-31T00:00:00.000Z")
+    }).createRegistry();
+
+    assert.deepEqual(registry.getAllDefinitions().map((resource) => resource.name), [
+      "instruction:resources/instructions/AGENTS",
+      "memory:resources/memory/MEMORY"
+    ]);
+    assert.equal(
+      registry.getDefinition("memory:resources/memory/MEMORY")?.promptFragment,
+      [
+        `<memory_context source="${join(agentDir, "resources/memory/MEMORY.md")}">`,
+        "Remember project decisions.",
+        "</memory_context>"
+      ].join("\n")
+    );
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("ToolsLoader creates a registry from the agent tools entry", async () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeResource(agentDir, "tools/index.js", [
+      "export const tools = [{",
+      "  name: \"inspect_runtime\",",
+      "  label: \"Inspect Runtime\",",
+      "  description: \"Inspect runtime state.\",",
+      "  promptSnippet: \"Inspect runtime state.\",",
+      "  promptGuidelines: [],",
+      "  sourceInfo: { source: \"sdk\", label: \"test\" },",
+      "  parameters: {},",
+      "  async execute() {",
+      "    return { content: [{ type: \"text\", text: \"ok\" }], details: {} };",
+      "  }",
+      "}];"
+    ].join("\n"));
+
+    const registry = await new ToolsLoader({ agentDir }).createRegistry();
+
+    assert.deepEqual(registry.getAllEntries().map((entry) => entry.tool.name), [
+      "inspect_runtime"
+    ]);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("ResourceCatalog injects loaded context resources without treating skills or templates as prompt fragments", () => {
   const registration = registerFauxProvider({ provider: "resource-loader-test" });
   const agentDir = createTempAgentDir();
@@ -97,7 +156,7 @@ test("ResourceCatalog injects loaded context resources without treating skills o
     });
     const catalog = new ResourceCatalog(
       createAgentResourceRegistry([registryResource]),
-      new AgentAppResourceLoader({
+      new ResourceLoader({
         agentDir,
         now: () => new Date("2026-07-31T00:00:00.000Z")
       })
@@ -154,7 +213,7 @@ test("RuntimeAssembler accepts a resource loader as the text resource discovery 
     writeResource(agentDir, "resources/memory/MEMORY.md", "The project chose file-backed memory v1.");
     writeResource(agentDir, "tools/ignored.ts", "export const ignored = true;");
     const assembler = new RuntimeAssembler({
-      resourceLoader: new AgentAppResourceLoader({
+      resourceLoader: new ResourceLoader({
         agentDir,
         now: () => new Date("2026-07-31T00:00:00.000Z")
       })

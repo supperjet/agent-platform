@@ -64,3 +64,5 @@ export const exampleCliTools = [
   exampleReadNoteTool,
   exampleListCapabilitiesTool
 ] as const;
+
+export const tools = exampleCliTools;

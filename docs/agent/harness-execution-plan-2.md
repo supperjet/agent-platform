@@ -1561,17 +1561,20 @@ agent/
 
 注册与发现约束：
 
-- Resource 支持两条入口：`createAgentResourceRegistry(...)` 手动注册，以及
-  `AgentAppResourceLoader({ agentDir })` 按目录结构自动发现文本资源。
-- Tool 也应支持两条入口：`createAgentToolRegistry(...)` 手动注册，以及后续
-  ToolLoader 按 `agent/tools/` 自动发现工具定义。
+- 应用入口只指定目录：`ResourceLoader({ agentDir }).createRegistry()` 按目录
+  结构发现文本资源并生成 ResourceRegistry。
+- 应用入口只指定目录：`ToolsLoader({ agentDir }).createRegistry()` 从
+  `agent/tools/index` 发现工具定义并生成 ToolRegistry。
+- `createAgentResourceRegistry(...)` / `createAgentToolRegistry(...)` 作为低层
+  构造函数保留给 loader 内部、测试和高级 SDK 场景；普通 agent 应用不显式调用。
 - ToolLoader 不能复用 ResourceLoader；ResourceLoader 的产物必须保持可序列化、
   可审计、无执行闭包，而工具定义天然包含 `execute`。
 - `initialToolNames` / `initialResourceNames` 这类“启动时启用列表”暂不进入
   `AgentPlaygroundOptions`。资源和工具的启用/禁用需要后续单独设计，避免注册、
   发现和激活三个概念混在一起。
-- `AgentPlaygroundOptions` 对外只保留装配依赖和 `conversationFile`。compaction
-  summarizer 默认使用 LLM；`requestTimeoutMs`、`json` 这类调试启动参数先移除。
+- `AgentPlaygroundOptions` 对外只保留 registry 级装配依赖和 `conversationFile`，
+  不暴露 `resourceLoader` / `toolsLoader`。compaction summarizer 默认使用 LLM；
+  `requestTimeoutMs`、`json` 这类调试启动参数先移除。
 
 任务流程：
 

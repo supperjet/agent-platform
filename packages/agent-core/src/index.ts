@@ -23,4 +23,5 @@ export * from "./tools/operations/index.js";
 export * from "./tools/policy/index.js";
 export * from "./tools/tool-runtime.js";
 export * from "./tools/tool-registry.js";
+export * from "./tools/tool-loader.js";
 export * from "./tools/tool-catalog.js";

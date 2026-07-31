@@ -1,5 +1,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
+import {
+  createAgentResourceRegistry,
+  type AgentResourceDefinition,
+  type AgentResourceRegistry
+} from "./resource-catalog.js";
 
 /**
  * ResourceLoader 只处理“文本资源”的发现和读取。
@@ -62,11 +67,11 @@ export type LoadedResourceSnapshot = {
 };
 
 /** ResourceLoader 是一个窄接口，方便未来替换为数据库、远程包或测试 fake。 */
-export type ResourceLoader = {
+export type IResourceLoader = {
   load(): LoadedResourceSnapshot;
 };
 
-export type AgentAppResourceLoaderOptions = {
+export type ResourceLoaderOptions = {
   /** Directory that contains agent/index.ts, resources/, skills/, and tools/. */
   agentDir: string;
   now?: () => Date;
@@ -111,11 +116,11 @@ const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
  *   tools/
  * ```
  */
-export class AgentAppResourceLoader implements ResourceLoader {
+export class ResourceLoader implements IResourceLoader {
   private readonly agentDir: string;
   private readonly now: () => Date;
 
-  constructor(options: AgentAppResourceLoaderOptions) {
+  constructor(options: ResourceLoaderOptions) {
     this.agentDir = resolve(options.agentDir);
     this.now = options.now ?? (() => new Date());
   }
@@ -146,6 +151,15 @@ export class AgentAppResourceLoader implements ResourceLoader {
       resources: sortResources(resources, diagnostics),
       diagnostics
     };
+  }
+
+  /** 按目录约定发现资源，并把可直接进入 prompt 的文本资源注册成 ResourceRegistry。 */
+  createRegistry(): AgentResourceRegistry {
+    const snapshot = this.load();
+    throwIfResourceLoadFailed(snapshot.diagnostics);
+    return createAgentResourceRegistry(snapshot.resources
+      .filter(isDirectlyInjectableResource)
+      .map(createAgentResourceDefinitionFromLoadedResource));
   }
 
   private loadDirectory(
@@ -235,6 +249,52 @@ export class AgentAppResourceLoader implements ResourceLoader {
       });
       return undefined;
     }
+  }
+}
+
+function throwIfResourceLoadFailed(diagnostics: readonly ResourceDiagnostic[]) {
+  const error = diagnostics.find((diagnostic) => diagnostic.type === "error");
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+function isDirectlyInjectableResource(resource: LoadedTextResource): boolean {
+  return resource.kind !== "prompt-template" && resource.kind !== "skill";
+}
+
+function createAgentResourceDefinitionFromLoadedResource(
+  resource: LoadedTextResource
+): AgentResourceDefinition {
+  return {
+    name: resource.name,
+    label: resource.label,
+    kind: resource.kind,
+    promptFragment: formatLoadedResourcePromptFragment(resource),
+    sourceInfo: {
+      source: resource.sourceInfo.source,
+      label: resource.sourceInfo.label,
+      ...(resource.sourceInfo.path ? { path: resource.sourceInfo.path } : {}),
+      scope: resource.sourceInfo.scope
+    }
+  };
+}
+
+function formatLoadedResourcePromptFragment(resource: LoadedTextResource): string {
+  const sourcePath = resource.sourceInfo.path ?? resource.sourceInfo.label;
+  switch (resource.kind) {
+    case "instruction":
+      return `<project_instructions source="${sourcePath}">\n${resource.content}\n</project_instructions>`;
+    case "memory":
+      return `<memory_context source="${sourcePath}">\n${resource.content}\n</memory_context>`;
+    case "reference":
+      return `<reference_context source="${sourcePath}">\n${resource.content}\n</reference_context>`;
+    case "system-prompt":
+    case "append-system-prompt":
+      return resource.content;
+    case "prompt-template":
+    case "skill":
+      throw new Error(`Loaded resource kind "${resource.kind}" is not directly injectable.`);
   }
 }
 

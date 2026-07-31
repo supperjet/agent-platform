@@ -99,7 +99,7 @@ agent/
 - `system-prompt`：替换基础 system prompt 的文本来源。
 - `append-system-prompt`：追加到基础 system prompt 的文本来源。
 
-当前 `AgentAppResourceLoader` 支持以下目录：
+当前 `ResourceLoader` 支持以下目录：
 
 | 目录 | kind | 是否直接注入 prompt |
 |---|---|---|
@@ -140,7 +140,8 @@ agent/
 
 ```text
 agent/index.ts
-  -> new AgentAppResourceLoader({ agentDir })
+  -> new ResourceLoader({ agentDir })
+  -> createRegistry()
   -> RuntimeAssembler
   -> ResourceCatalog.load(...)
   -> PromptAssembler.assemble(...)
@@ -155,20 +156,29 @@ AgentDefinition.resourceNames
   -> ResourceCatalog.resolveForDefinition(...)
 ```
 
-当同时存在 registry resources 和 loader resources 时，Catalog 会先放 registry
-资源，再追加 loader 资源。这样显式声明的资源先出现，workspace 上下文随后补充。
+应用入口不直接手写 resource registry。推荐流程是：
 
-Resource 注册有两条入口：
+```text
+new ResourceLoader({ agentDir })
+  -> load text resources
+  -> createRegistry()
+  -> ResourceCatalog.resolveForDefinition(...)
+```
 
-- 手动注册：调用 `createAgentResourceRegistry(...)`，适合 SDK/builtin/测试资源。
-- 目录发现：应用入口创建 `AgentAppResourceLoader({ agentDir })`，按 `agent/resources/`
-  和 `agent/skills/` 约定读取文本资源。
+`createAgentResourceRegistry(...)` 仍是低层构造函数，供 loader 内部、测试和高级
+SDK 场景使用；普通 `agent/index.ts` 只指定目录。
 
-Tool 注册也应保持两条入口，但它属于 tools 层：
+Tool 层保持平行但独立：
 
-- 手动注册：调用 `createAgentToolRegistry(...)`。
-- 目录发现：后续通过 ToolLoader / ToolCatalog 支持 `agent/tools/`，不能借用
-  ResourceLoader，因为工具包含执行函数和运行时策略。
+```text
+new ToolsLoader({ agentDir })
+  -> import agent/tools/index.js
+  -> createRegistry()
+  -> ToolCatalog.resolveForDefinition(...)
+```
+
+ToolsLoader 不能借用 ResourceLoader，因为工具包含执行函数和运行时策略，不能进入
+可序列化 resource snapshot。
 
 ## Diagnostics
 

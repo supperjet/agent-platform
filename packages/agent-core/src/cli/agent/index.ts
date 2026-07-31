@@ -4,33 +4,33 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { stderr } from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { startAgentPlayground } from "./main.js";
 import {
-  AgentAppResourceLoader,
-  createAgentResourceRegistry,
-  createAgentToolRegistry,
+  ResourceLoader,
+  ToolsLoader,
   getDeepSeekModel,
 } from "../../index.js";
-import { startAgentPlayground, type AgentPlaygroundOptions } from "./main.js";
+import type { AgentPlaygroundOptions } from "./main.js";
 
 export { startAgentPlayground };
 export type { AgentPlaygroundOptions };
 
 async function main() {
+  // 解析 agent 应用目录
   const agentDir = resolveAgentDir();
-  const resourceLoader = new AgentAppResourceLoader({ agentDir });
-  const resourceRegistry = createAgentResourceRegistry([]);
-  const toolRegistry = createAgentToolRegistry([]);
+  const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
+  const toolRegistry = await new ToolsLoader({ agentDir }).createRegistry();
+  // 获取模型
   const model = getDeepSeekModel();
 
   await startAgentPlayground({
     model,
-    resolveApiKey: (provider) => provider === "deepseek"
-      ? process.env.DEEPSEEK_API_KEY
-      : undefined,
-    resourceLoader,
     resourceRegistry,
     toolRegistry,
     workingDirectory: process.cwd(),
+    resolveApiKey: (provider) => provider === "deepseek"
+      ? process.env.DEEPSEEK_API_KEY
+      : undefined,
   });
 }
 
