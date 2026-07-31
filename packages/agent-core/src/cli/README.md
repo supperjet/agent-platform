@@ -94,6 +94,15 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 /events on|off|json    Toggle AgentRuntime and ToolRuntime event printing.
 /eventlog [runId]      Print stored EventStore records.
 /toolcalls [runId]     Print projected tool call recovery records.
+/runtime               Print runtime state snapshot and recovery assessment.
+/runtimelog            Print append-only runtime log entries.
+/compact status        Print compaction settings.
+/compact run [keep N]  Manually compact older conversation messages.
+/compact auto on|off   Toggle automatic composite compaction.
+/compact auto protect N
+                       Protect N latest messages when auto compaction runs.
+/compact summarizer llm|fallback
+                       Choose LLM-driven or deterministic fallback summaries.
 /lifecycle on|off|json Toggle LifecycleRunner hook logging.
 /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
 /runs                  Print stored RunStore records.
@@ -101,7 +110,7 @@ Inside the playground, ordinary input is sent as a prompt to the current runtime
 /save                  Save conversation state to local storage.
 /delete                Delete the saved local conversation state.
 /storage               Print the local state file path.
-/context               Print the last assembled prompt context.
+/context               Print the last assembled prompt context and budget diagnostics.
 /snapshot              Print runtime snapshot.
 /system                Print current assembled system prompt.
 /reset                 Reset conversation session.
@@ -119,14 +128,30 @@ The injected review message is run-local context: it is visible through
 `/context`, but it is not written to `/state`.
 Runtime message events include `messageScope`, so consumers can keep transient
 context in debug logs without rendering it as conversation transcript.
+`/context` also prints budget diagnostics for the last assembled prompt,
+including estimated input tokens, available input budget, pressure status, and
+largest message contributors. Automatic composite compaction is off by default;
+enable it with `/compact auto on`, and adjust the protected recent-message
+window with `/compact auto protect N`. The playground default targets about 70% context
+pressure and uses role-aware, largest-first, and token-budget source selection.
+Compaction summaries use the deterministic fallback summarizer by default; switch
+to the model-backed summarizer with `/compact summarizer llm`, or start the
+playground with `--playground-compaction-summarizer llm`.
 
 The playground also records prompt execution into in-memory RunStore and
 EventStore instances. Use `/runs` to inspect prompt run outcomes, and
 `/eventlog` or `/eventlog <runId>` to inspect stored runtime events.
 Use `/toolcalls` or `/toolcalls <runId>` to inspect projected tool call recovery
-records from the same EventStore stream. Playground inspection commands such as
-`/state`, `/context`, `/runs`, `/eventlog`, and `/toolcalls` do not create new
-run records.
+records from the same EventStore stream. The playground also records a
+session-level runtime snapshot and append-only runtime log; use `/runtime` to
+inspect clean/dirty/interrupted recovery assessment, and `/runtimelog` to inspect
+the audit log. `/compact run` creates a compact command run record and appends a
+compaction entry to the exported conversation state when there are older messages
+to summarize.
+When automatic compaction is enabled with `/compact auto on`, pressured prompt
+turns can append a compaction entry before the prompt is sent to the model.
+Inspection commands such as `/state`, `/context`, `/runs`, `/eventlog`,
+`/toolcalls`, `/runtime`, and `/runtimelog` do not create new run records.
 
 The playground stores local conversation state as a JSON snapshot. By default,
 it reads and writes:
@@ -159,7 +184,7 @@ For machine-readable hook traces:
 请使用 read 工具读取 package.json
 ```
 
-Prompt execution currently logs `onInput`, `beforeRun`, `beforeContext`, `afterMessage`, and `afterRun`. Tool execution logs `beforeToolCall` and `afterToolCall` when the model calls a tool. `beforeCompaction` is defined but will only appear once compaction is wired into the run pipeline.
+Prompt execution currently logs `onInput`, `beforeRun`, `beforeContext`, `afterMessage`, and `afterRun`. Tool execution logs `beforeToolCall` and `afterToolCall` when the model calls a tool. Manual `/compact run` execution logs `beforeCompaction` and `afterRun`.
 
 ### Lifecycle Hook Examples
 

@@ -26,11 +26,12 @@ import { exampleCliTools } from "./example-tools.js";
 type CliOptions = {
   json: boolean;
   faux: boolean;
-  fauxResponse: string;
+  fauxResponses: string[];
   exampleResources: boolean;
   exampleTools: boolean;
   modelId: string;
   agentPlayground: boolean;
+  playgroundCompactionSummarizer: "fallback" | "llm";
   callTool?: string;
   approveToolCall: boolean;
   noToolPolicy: boolean;
@@ -61,7 +62,9 @@ async function main() {
     : undefined;
 
   if (registration) {
-    registration.setResponses([fauxAssistantMessage(fauxText(options.fauxResponse))]);
+    // playground 测试可能同时触发普通 prompt 调用和 LLM compaction summary 调用，
+    // 因此 faux 模式允许传入多条响应，按 provider 调用顺序依次消费。
+    registration.setResponses(options.fauxResponses.map((response) => fauxAssistantMessage(fauxText(response))));
   }
 
   try {
@@ -89,6 +92,7 @@ async function main() {
         initialCwd: options.toolCwd,
         ...(options.toolNames.length > 0 ? { initialToolNames: options.toolNames } : {}),
         ...(options.resourceNames.length > 0 ? { initialResourceNames: options.resourceNames } : {}),
+        initialCompactionSummarizer: options.playgroundCompactionSummarizer,
         ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
         ...(options.playgroundStateFile === undefined ? {} : { stateFile: options.playgroundStateFile }),
         json: options.json
@@ -175,11 +179,12 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
   const options: CliOptions = {
     json: false,
     faux: false,
-    fauxResponse: "Faux runtime response.",
+    fauxResponses: [],
     exampleResources: false,
     exampleTools: false,
     modelId: process.env.DEEPSEEK_MODEL_ID ?? "deepseek-v4-flash",
     agentPlayground: false,
+    playgroundCompactionSummarizer: "fallback",
     approveToolCall: false,
     noToolPolicy: false,
     printResources: false,
@@ -219,7 +224,7 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
       continue;
     }
     if (arg === "--faux-response") {
-      options.fauxResponse = requireValue(args, ++index, "--faux-response");
+      options.fauxResponses.push(requireValue(args, ++index, "--faux-response"));
       continue;
     }
     if (arg === "--model") {
@@ -236,6 +241,14 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
     }
     if (arg === "--playground-state-file") {
       options.playgroundStateFile = resolve(requireValue(args, ++index, "--playground-state-file"));
+      continue;
+    }
+    if (arg === "--playground-compaction-summarizer") {
+      // 这是启动时的默认值；进入 playground 后仍可通过
+      // /compact summarizer llm|fallback 动态切换并 rebuild runtime。
+      options.playgroundCompactionSummarizer = parsePlaygroundCompactionSummarizer(
+        requireValue(args, ++index, "--playground-compaction-summarizer"),
+      );
       continue;
     }
     if (arg === "--call-tool") {
@@ -288,10 +301,18 @@ async function parseArgs(args: string[]): Promise<CliOptions> {
   }
 
   options.prompt = promptParts.join(" ").trim();
+  if (options.fauxResponses.length === 0) {
+    options.fauxResponses.push("Faux runtime response.");
+  }
   if (!options.prompt && !options.agentPlayground && !options.callTool && !options.printSystemPrompt && !options.printTools && !options.printResources && !stdin.isTTY) {
     options.prompt = await readStdin();
   }
   return options;
+}
+
+function parsePlaygroundCompactionSummarizer(value: string): "fallback" | "llm" {
+  if (value === "fallback" || value === "llm") return value;
+  throw new Error('--playground-compaction-summarizer expects "fallback" or "llm".');
 }
 
 async function callToolDirectly(
@@ -475,6 +496,8 @@ Options:
   --agent-playground        Start an interactive AgentRuntime playground.
   --playground-state-file <path>
                             Override the playground local state file.
+  --playground-compaction-summarizer <fallback|llm>
+                            Choose the playground compaction summarizer. Defaults to fallback.
   --call-tool <name>        Execute a registered tool directly without calling the model.
   --tool-args <json>        JSON arguments for --call-tool. Defaults to {}.
   --tool-cwd <path>         Working directory for built-in ToolOperations. Defaults to process cwd.

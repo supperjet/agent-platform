@@ -10,6 +10,7 @@ export type AgentRuntimeCommand =
   | { type: "prompt"; text: string }
   | { type: "steer"; text: string }
   | { type: "follow-up"; text: string }
+  | { type: "compact"; reason?: "manual"; keepLastMessages?: number }
   | { type: "abort" };
 
 export type AgentRuntimeSnapshot = {

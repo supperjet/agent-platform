@@ -170,6 +170,30 @@ function assertConversationEntry(entry: unknown): asserts entry is ConversationE
       throw new Error("Agent conversation state entry message is invalid.");
     }
   }
+  if (entry.kind === "compaction") {
+    const payload = entry.payload;
+    if (!payload || typeof payload !== "object") {
+      throw new Error("Agent conversation state entry compaction payload is invalid.");
+    }
+    if (!("summary" in payload) || typeof payload.summary !== "string" || payload.summary.trim().length === 0) {
+      throw new Error("Agent conversation state entry compaction summary is invalid.");
+    }
+    if (!("sourceEntryIds" in payload) || !isStringArray(payload.sourceEntryIds)) {
+      throw new Error("Agent conversation state entry compaction sourceEntryIds are invalid.");
+    }
+    if (!("reason" in payload) || typeof payload.reason !== "string" || payload.reason.trim().length === 0) {
+      throw new Error("Agent conversation state entry compaction reason is invalid.");
+    }
+    if (!("createdBy" in payload) || typeof payload.createdBy !== "string" || payload.createdBy.trim().length === 0) {
+      throw new Error("Agent conversation state entry compaction createdBy is invalid.");
+    }
+    if ("preservedEntryIds" in payload && !isStringArray(payload.preservedEntryIds)) {
+      throw new Error("Agent conversation state entry compaction preservedEntryIds are invalid.");
+    }
+    if ("instructions" in payload && payload.instructions !== undefined && typeof payload.instructions !== "string") {
+      throw new Error("Agent conversation state entry compaction instructions are invalid.");
+    }
+  }
 }
 
 /**
@@ -196,4 +220,8 @@ function assertEntryGraph(entries: readonly ConversationEntry[], leafId: string 
       throw new Error(`Agent conversation state entry parentId does not reference an entry: ${entry.parentId}`);
     }
   }
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim().length > 0);
 }

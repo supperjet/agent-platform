@@ -46,8 +46,16 @@ export type ConversationCompactionEntry = {
   payload: {
     /** 对被压缩历史的自然语言摘要。 */
     summary: string;
-    /** 可选：这条摘要覆盖或来源于哪些 entry，用于诊断和审计。 */
-    sourceEntryIds?: readonly ConversationEntryId[];
+    /** 这条摘要覆盖的 active path message entries。 */
+    sourceEntryIds: readonly ConversationEntryId[];
+    /** 触发压缩的原因，例如 manual / threshold / overflow。 */
+    reason: string;
+    /** 创建摘要的主体，例如 runtime / host / model。 */
+    createdBy: string;
+    /** 可选：压缩时明确保留原文的 active path message entries。 */
+    preservedEntryIds?: readonly ConversationEntryId[];
+    /** 可选：生成摘要时使用的额外压缩指令。 */
+    instructions?: string;
   };
 };
 
@@ -136,6 +144,13 @@ export function isConversationMessageEntry(
   entry: ConversationEntry
 ): entry is ConversationMessageEntry {
   return entry.kind === "message";
+}
+
+/** 类型守卫：判断 entry 是否为 compaction 摘要。 */
+export function isConversationCompactionEntry(
+  entry: ConversationEntry
+): entry is ConversationCompactionEntry {
+  return entry.kind === "compaction";
 }
 
 /**

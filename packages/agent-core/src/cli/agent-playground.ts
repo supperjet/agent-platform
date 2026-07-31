@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { stdin, stderr, stdout } from "node:process";
 import { createInterface, type Interface } from "node:readline/promises";
-import type { AgentModel, AgentRuntime } from "../contracts.js";
+import type { AgentModel, AgentRuntime, AgentRuntimeCommand } from "../contracts.js";
 import {
   createAgentResourceRegistry,
   createAgentToolRegistry,
@@ -10,14 +10,21 @@ import {
   createLifecycleRunner,
   createLocalToolOperations,
   InMemoryEventStore,
+  InMemoryRuntimeLogStore,
+  InMemoryRuntimeStateStore,
   InMemoryRunStore,
   LocalConversationStateStore,
+  createConversationCompactionPlan,
+  createLlmConversationSummarizer,
   createToolRuntime,
+  createCompositeCompactionPolicy,
   formatAgentDefinition,
   projectToolCallRecordsFromEvents,
+  assessRuntimeRecovery,
   PiAgentRuntimeFactory,
   type AgentExecutionOutcome,
   type AgentRuntimeEvent,
+  type AgentRuntimeStateSnapshot,
   type LifecycleHooks,
 } from "../index.js";
 import type { AgentResourceDefinition } from "../resources/resource-catalog.js";
@@ -32,6 +39,7 @@ import { createUserMessage } from "../runtime/messages.js";
 type ApprovalMode = "ask" | "always" | "never";
 type EventMode = "off" | "on" | "json";
 type LifecycleMode = "off" | "on" | "json";
+type CompactionSummarizerMode = "fallback" | "llm";
 
 const PLAYGROUND_COMMANDS = new Set([
   "help",
@@ -41,6 +49,9 @@ const PLAYGROUND_COMMANDS = new Set([
   "events",
   "eventlog",
   "toolcalls",
+  "runtime",
+  "runtimelog",
+  "compact",
   "lifecycle",
   "cwd",
   "runs",
@@ -64,6 +75,7 @@ export type AgentPlaygroundOptions = {
   initialCwd: string;
   initialToolNames?: readonly string[];
   initialResourceNames?: readonly string[];
+  initialCompactionSummarizer?: CompactionSummarizerMode;
   requestTimeoutMs?: number;
   stateFile?: string;
   json?: boolean;
@@ -74,6 +86,9 @@ type PlaygroundState = {
   toolNames: string[];
   resourceNames: string[];
   policyEnabled: boolean;
+  compactionEnabled: boolean;
+  compactionProtectLastMessages: number;
+  compactionSummarizerMode: CompactionSummarizerMode;
   approvalMode: ApprovalMode;
   eventMode: EventMode;
   lifecycleMode: LifecycleMode;
@@ -83,14 +98,27 @@ type PlaygroundState = {
   stateFile: string;
   runStore: InMemoryRunStore;
   eventStore: InMemoryEventStore;
+  runtimeStateStore: InMemoryRuntimeStateStore;
+  runtimeLogStore: InMemoryRuntimeLogStore;
+  runtimeRecorder: PlaygroundRuntimeRecorder;
   runRecorder: PlaygroundRunRecorder;
   nextRunSequence: number;
+  nextRuntimeLogSequence: number;
 };
 
 type PlaygroundRunRecorder = {
   activeRun?: {
     runId: string;
     nextEventSequence: number;
+  };
+};
+
+type PlaygroundRuntimeRecorder = {
+  activeCommand?: {
+    commandId: string;
+    runId: string;
+    command: AgentRuntimeCommand;
+    startedAt: string;
   };
 };
 
@@ -114,7 +142,10 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   const localStore = new LocalConversationStateStore({ stateFile });
   const runStore = new InMemoryRunStore();
   const eventStore = new InMemoryEventStore();
+  const runtimeStateStore = new InMemoryRuntimeStateStore();
+  const runtimeLogStore = new InMemoryRuntimeLogStore();
   const runRecorder: PlaygroundRunRecorder = {};
+  const runtimeRecorder: PlaygroundRuntimeRecorder = {};
   const restoredFile = await localStore.load();
 
   const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
@@ -124,6 +155,9 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       toolNames: state?.toolNames ?? [...(options.initialToolNames ?? BUILT_IN_TOOL_NAMES)],
       resourceNames: state?.resourceNames ?? [...(options.initialResourceNames ?? [])],
       policyEnabled: state?.policyEnabled ?? true,
+      compactionEnabled: state?.compactionEnabled ?? false,
+      compactionProtectLastMessages: state?.compactionProtectLastMessages ?? 6,
+      compactionSummarizerMode: state?.compactionSummarizerMode ?? options.initialCompactionSummarizer ?? "fallback",
       approvalMode: state?.approvalMode ?? "ask",
       eventMode: state?.eventMode ?? (options.json ? "json" : "on"),
       lifecycleMode: state?.lifecycleMode ?? "off",
@@ -131,13 +165,18 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       stateFile,
       runStore: state?.runStore ?? runStore,
       eventStore: state?.eventStore ?? eventStore,
+      runtimeStateStore: state?.runtimeStateStore ?? runtimeStateStore,
+      runtimeLogStore: state?.runtimeLogStore ?? runtimeLogStore,
+      runtimeRecorder,
       runRecorder,
       nextRunSequence: state?.nextRunSequence ?? 1,
+      nextRuntimeLogSequence: state?.nextRuntimeLogSequence ?? 1,
     }, previousState);
     state = next;
   };
 
   rebuildRuntime(false, restoredFile?.agentState);
+  await saveRuntimeSnapshot(state!, "idle", "clean");
   printIntro(state);
   if (restoredFile) {
     stdout.write(`restored: ${stateFile}\n`);
@@ -161,6 +200,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
     }
 
     const run = await startPlaygroundRun(state, "prompt");
+    await markRuntimeCommandAccepted(state, run.runId, run.commandId, { type: "prompt", text: line });
     let outcome: AgentExecutionOutcome;
     try {
       outcome = await state.runtime.execute({ type: "prompt", text: line });
@@ -173,12 +213,22 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
     }
     await finishPlaygroundRun(state, run.runId, outcome);
     if (outcome.status === "failed" || outcome.status === "commit_failed") {
+      await markRuntimeCommandFinished(state, outcome);
       stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
     } else if (outcome.status === "aborted") {
-      await savePlaygroundState(state);
-      stderr.write("Run aborted.\n");
+      const commitOutcome = await commitPlaygroundConversationState(state);
+      await markRuntimeCommandFinished(state, commitOutcome);
+      if (commitOutcome.status === "commit_failed") {
+        stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
+      } else {
+        stderr.write("Run aborted.\n");
+      }
     } else {
-      await savePlaygroundState(state);
+      const commitOutcome = await commitPlaygroundConversationState(state);
+      await markRuntimeCommandFinished(state, commitOutcome);
+      if (commitOutcome.status === "commit_failed") {
+        stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
+      }
     }
     stdout.write("\n");
   }
@@ -223,7 +273,30 @@ function createRuntimeState(
     toolRegistry,
     toolRuntime,
     lifecycleHooks,
+    policies: {
+      queue: "direct",
+      retry: "none",
+      compaction: config.compactionEnabled
+        ? createCompositeCompactionPolicy({
+          targetPressure: 0.7,
+          protectLastMessages: config.compactionProtectLastMessages,
+        })
+        : "disabled",
+    },
     resolveApiKey: options.resolveApiKey,
+    ...(config.compactionSummarizerMode === "llm"
+      ? {
+        // playground 用结构化摘要作为默认 LLM 模式，方便人工观察 facts /
+        // decisions / currentTaskState 等字段质量；core API 默认仍保持 text 兼容。
+        conversationSummarizer: createLlmConversationSummarizer({
+          model: options.model,
+          resolveApiKey: options.resolveApiKey,
+          outputFormat: "structured-json",
+          ...resolvePlaygroundSummarizerInputBudget(options.model),
+          ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+        }),
+      }
+      : {}),
     ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
   });
   const runtime = factory.create("agent-core-playground", conversationState);
@@ -236,6 +309,20 @@ function createRuntimeState(
     ...config,
     runtime,
     lastSystemPrompt: createSystemPromptPreview(options, definition, resourceRegistry, toolRegistry, toolRuntime, lifecycleHooks),
+  };
+}
+
+function resolvePlaygroundSummarizerInputBudget(
+  model: AgentModel,
+): { maxInputTokens: number } | Record<string, never> {
+  const contextWindow = (model as { contextWindow?: unknown }).contextWindow;
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow < 1) {
+    return {};
+  }
+  // 摘要器也有自己的 prompt。这里保守使用模型上下文窗口的一半，避免“为了压缩主
+  // 对话，先把摘要调用本身撑爆”。真实效果后续还要结合模型和长会话调参。
+  return {
+    maxInputTokens: Math.max(1, Math.floor(contextWindow * 0.5)),
   };
 }
 
@@ -395,6 +482,18 @@ async function handleCommand(
     await printStoredToolCalls(state, value);
     return true;
   }
+  if (command === "runtime") {
+    await printRuntimeState(state);
+    return true;
+  }
+  if (command === "runtimelog") {
+    await printRuntimeLog(state);
+    return true;
+  }
+  if (command === "compact") {
+    await handleCompactCommand(state, value, rebuildRuntime);
+    return true;
+  }
   if (command === "lifecycle") {
     state.lifecycleMode = parseLifecycleMode(value);
     rebuildRuntime(true);
@@ -478,7 +577,7 @@ function createSystemPromptPreview(
 
 async function startPlaygroundRun(
   state: PlaygroundState,
-  commandType: "prompt",
+  commandType: AgentRuntimeCommand["type"],
 ) {
   const sequence = state.nextRunSequence;
   state.nextRunSequence += 1;
@@ -497,6 +596,65 @@ async function startPlaygroundRun(
   });
 }
 
+async function markRuntimeCommandAccepted(
+  state: PlaygroundState,
+  runId: string,
+  commandId: string,
+  command: AgentRuntimeCommand,
+) {
+  const startedAt = new Date().toISOString();
+  state.runtimeRecorder.activeCommand = {
+    commandId,
+    runId,
+    command,
+    startedAt,
+  };
+  await appendRuntimeLog(state, "command_accepted", {
+    commandId,
+    runId,
+    command,
+  });
+  await saveRuntimeSnapshot(state, "running", "dirty");
+}
+
+async function markRuntimeCommandFinished(
+  state: PlaygroundState,
+  outcome: AgentExecutionOutcome,
+) {
+  const activeCommand = state.runtimeRecorder.activeCommand;
+  if (!activeCommand) return;
+  await appendRuntimeLog(state, outcome.status === "commit_failed" ? "state_commit_failed" : "command_finished", {
+    commandId: activeCommand.commandId,
+    runId: activeCommand.runId,
+    outcome,
+  });
+  delete state.runtimeRecorder.activeCommand;
+  await saveRuntimeSnapshot(
+    state,
+    outcome.status === "commit_failed"
+      ? "commit_failed"
+      : outcome.status === "failed"
+        ? "failed"
+        : "idle",
+    outcome.status === "commit_failed" ? "commit_failed" : "clean",
+  );
+}
+
+async function commitPlaygroundConversationState(
+  state: PlaygroundState,
+): Promise<AgentExecutionOutcome> {
+  try {
+    await savePlaygroundState(state);
+    return { status: "succeeded" };
+  } catch (error) {
+    return {
+      status: "commit_failed",
+      errorCode: "PLAYGROUND_STATE_COMMIT_FAILED",
+      message: readErrorMessage(error),
+    };
+  }
+}
+
 async function finishPlaygroundRun(
   state: PlaygroundState,
   runId: string,
@@ -512,6 +670,52 @@ async function finishPlaygroundRun(
   } finally {
     delete state.runRecorder.activeRun;
   }
+}
+
+async function saveRuntimeSnapshot(
+  state: PlaygroundState,
+  status: AgentRuntimeStateSnapshot["status"],
+  dirtyState: AgentRuntimeStateSnapshot["dirtyState"],
+) {
+  const activeCommand = state.runtimeRecorder.activeCommand;
+  const snapshot: AgentRuntimeStateSnapshot = {
+    snapshotId: `playground-runtime-snapshot-${state.nextRuntimeLogSequence}`,
+    sessionId: "agent-core-playground",
+    status,
+    dirtyState,
+    ...(activeCommand
+      ? {
+          activeCommand: {
+            commandId: activeCommand.commandId,
+            runId: activeCommand.runId,
+            command: activeCommand.command,
+            startedAt: activeCommand.startedAt,
+          },
+        }
+      : {}),
+    queuedCommands: [],
+    lastCommittedStateVersion: state.runtime.exportState().schemaVersion,
+    updatedAt: new Date().toISOString(),
+  };
+  await state.runtimeStateStore.save(snapshot);
+  await appendRuntimeLog(state, "runtime_snapshot_saved", snapshot);
+}
+
+async function appendRuntimeLog(
+  state: PlaygroundState,
+  type: Parameters<InMemoryRuntimeLogStore["append"]>[0]["type"],
+  payload: unknown,
+) {
+  const sequence = state.nextRuntimeLogSequence;
+  state.nextRuntimeLogSequence += 1;
+  await state.runtimeLogStore.append({
+    entryId: `playground-runtime-log-${sequence}`,
+    sessionId: "agent-core-playground",
+    sequence,
+    type,
+    payload,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 function recordRuntimeEvent(
@@ -566,6 +770,86 @@ async function printStoredToolCalls(state: PlaygroundState, runId: string) {
     return;
   }
   stdout.write(`${JSON.stringify(records, null, 2)}\n`);
+}
+
+async function printRuntimeState(state: PlaygroundState) {
+  const snapshot = await state.runtimeStateStore.get("agent-core-playground");
+  if (!snapshot) {
+    stdout.write("runtime: (none)\n");
+    return;
+  }
+  stdout.write(`${JSON.stringify({
+    snapshot,
+    recovery: assessRuntimeRecovery(snapshot),
+  }, null, 2)}\n`);
+}
+
+async function printRuntimeLog(state: PlaygroundState) {
+  const entries = await state.runtimeLogStore.listBySession("agent-core-playground");
+  if (entries.length === 0) {
+    stdout.write("runtime log: (none)\n");
+    return;
+  }
+  stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+}
+
+async function runPlaygroundCompact(
+  state: PlaygroundState,
+  command: Extract<AgentRuntimeCommand, { type: "compact" }>,
+) {
+  const previewState = state.runtime.exportState();
+  const previewPlan = createConversationCompactionPlan({
+    entries: previewState.payload.entries,
+    leafId: previewState.payload.leafId,
+    reason: command.reason ?? "manual",
+    ...(command.keepLastMessages === undefined
+      ? {}
+      : { keepLastMessages: command.keepLastMessages }),
+    createdBy: "runtime",
+  });
+  const run = await startPlaygroundRun(state, "compact");
+  await markRuntimeCommandAccepted(state, run.runId, run.commandId, command);
+  let outcome: AgentExecutionOutcome;
+  try {
+    outcome = await state.runtime.execute(command);
+  } catch (error) {
+    outcome = {
+      status: "failed",
+      errorCode: "PLAYGROUND_COMPACT_FAILED",
+      message: readErrorMessage(error),
+    };
+  }
+  await finishPlaygroundRun(state, run.runId, outcome);
+  if (outcome.status === "failed" || outcome.status === "commit_failed") {
+    await markRuntimeCommandFinished(state, outcome);
+    stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
+    return;
+  }
+
+  const commitOutcome = await commitPlaygroundConversationState(state);
+  await markRuntimeCommandFinished(state, commitOutcome);
+  if (commitOutcome.status === "commit_failed") {
+    stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
+    return;
+  }
+  stdout.write("compacted.\n");
+  if (previewPlan?.selection) {
+    stdout.write(formatCompactionStageTrace(previewPlan.selection));
+  }
+}
+
+function formatCompactionStageTrace(
+  selection: NonNullable<ReturnType<typeof createConversationCompactionPlan>>["selection"],
+) {
+  if (!selection) return "";
+  return `compaction stages:\n${JSON.stringify({
+    compactionStages: selection.stageResults,
+    selectedEntryIds: selection.selectedEntryIds,
+    preservedEntryIds: selection.preservedEntryIds,
+    selectedEstimatedTokens: selection.selectedEstimatedTokens,
+    estimatedTokensBefore: selection.estimatedTokensBefore,
+    estimatedTokensAfterTarget: selection.estimatedTokensAfterTarget,
+  }, null, 2)}\n`;
 }
 
 async function savePlaygroundState(state: PlaygroundState) {
@@ -655,6 +939,74 @@ function parseLifecycleMode(value: string): LifecycleMode {
   throw new Error('/lifecycle expects "on", "off", or "json".');
 }
 
+async function handleCompactCommand(
+  state: PlaygroundState,
+  value: string,
+  rebuildRuntime: (preserveState?: boolean) => void,
+) {
+  if (!value || value === "status") {
+    stdout.write(formatCompactStatus(state));
+    return;
+  }
+
+  if (value === "run") {
+    await runPlaygroundCompact(state, { type: "compact", reason: "manual" });
+    return;
+  }
+  const runMatch = value.match(/^run\s+keep\s+(\d+)$/);
+  if (runMatch?.[1]) {
+    await runPlaygroundCompact(state, {
+      type: "compact",
+      reason: "manual",
+      keepLastMessages: Number(runMatch[1]),
+    });
+    return;
+  }
+
+  const autoMatch = value.match(/^auto\s+(on|off|status)$/);
+  if (autoMatch?.[1]) {
+    if (autoMatch[1] !== "status") {
+      state.compactionEnabled = autoMatch[1] === "on";
+      rebuildRuntime(true);
+    }
+    stdout.write(formatCompactStatus(state));
+    return;
+  }
+
+  const protectMatch = value.match(/^auto\s+protect\s+(\d+)$/);
+  if (protectMatch?.[1]) {
+    state.compactionProtectLastMessages = Number(protectMatch[1]);
+    rebuildRuntime(true);
+    stdout.write(formatCompactStatus(state));
+    return;
+  }
+
+  const summarizerMatch = value.match(/^summarizer\s+(fallback|llm|status)$/);
+  if (summarizerMatch?.[1]) {
+    const mode = parseCompactionSummarizerMode(summarizerMatch[1]);
+    if (mode) {
+      // 切换 summarizer 后必须 rebuild runtime，因为 summarizer 是注入
+      // PiAgentRuntimeFactory / AgentRuntimeSession 的运行态依赖。
+      state.compactionSummarizerMode = mode;
+      rebuildRuntime(true);
+    }
+    stdout.write(formatCompactStatus(state));
+    return;
+  }
+
+  throw new Error('/compact expects "status", "run [keep N]", "auto on|off|status", "auto protect <number>", or "summarizer fallback|llm|status".');
+}
+
+function formatCompactStatus(state: PlaygroundState) {
+  return `compact: auto=${state.compactionEnabled ? "on" : "off"}, protectLast=${state.compactionProtectLastMessages}, summarizer=${state.compactionSummarizerMode}\n`;
+}
+
+function parseCompactionSummarizerMode(value: string): CompactionSummarizerMode | undefined {
+  if (value === "fallback" || value === "llm") return value;
+  if (value === "status") return undefined;
+  throw new Error('/compact summarizer expects "fallback", "llm", or "status".');
+}
+
 function formatLifecycleValue(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
@@ -673,6 +1025,7 @@ function printIntro(state: PlaygroundState | undefined) {
     stdout.write(`cwd: ${state.cwd}\n`);
     stdout.write(`tools: ${state.toolNames.join(", ")}\n`);
     stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}, lifecycle: ${state.lifecycleMode}\n`);
+    stdout.write(formatCompactStatus(state));
   }
 }
 
@@ -687,6 +1040,15 @@ function printHelp() {
   /events on|off|json    Toggle runtime and ToolRuntime event printing.
   /eventlog [runId]      Print stored EventStore records.
   /toolcalls [runId]     Print projected tool call recovery records.
+  /runtime               Print runtime state snapshot and recovery assessment.
+  /runtimelog            Print append-only runtime log entries.
+  /compact status        Print compaction settings.
+  /compact run [keep N]  Manually compact older conversation messages.
+  /compact auto on|off   Toggle automatic composite compaction.
+  /compact auto protect N
+                         Protect N latest messages when auto compaction runs.
+  /compact summarizer llm|fallback
+                         Choose LLM-driven or deterministic fallback summaries.
   /lifecycle on|off|json Toggle LifecycleRunner hook logging.
   /cwd <path>            Rebuild runtime with a new ToolOperations cwd.
   /runs                  Print stored RunStore records.

@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createAgentToolRegistry,
+  createCompositeCompactionPolicy,
   defineAgentTool,
   formatAgentDefinition,
   requireToolApproval,
@@ -25,9 +26,12 @@ import {
 } from "../index.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
 import {
+  isConversationCompactionEntry,
   readConversationEntryMessage,
   type ConversationEntry
 } from "../conversation/conversation-entry.js";
+import { restoreConversationMessages } from "../conversation/conversation-state.js";
+import { ContextBudget } from "../context/context-budget.js";
 import {
   AgentRuntimeSession,
   LifecycleEventProcessingError
@@ -119,6 +123,55 @@ test("exports and restores a conversation without agent-server", async () => {
       [null, "session-restore:entry:1", "session-restore:entry:2", "session-restore:entry:3"]
     );
     assert.equal(restoredPayload.leafId, "session-restore:entry:4");
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("runtime context diagnostics use the assembled model context window", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-budget-test" });
+  registration.setResponses([
+    fauxAssistantMessage(fauxText("Budget response."))
+  ]);
+  const model = {
+    ...registration.getModel(),
+    contextWindow: 10000,
+    maxTokens: 100,
+  };
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "budget-agent",
+      model,
+      instructions: ["Answer concisely in Chinese."],
+      toolNames: []
+    }),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-budget");
+
+  try {
+    await runtime.execute({ type: "prompt", text: "hello budget" });
+    const context = runtime.inspectContext();
+    const budget = context?.diagnostics.budget as {
+      budgetSource: string;
+      maxTokens: number;
+      model?: {
+        provider?: string;
+        modelId?: string;
+        maxContextTokens: number;
+        reservedOutputTokens: number;
+        safetyMarginTokens: number;
+      };
+    } | undefined;
+
+    assert.equal(budget?.budgetSource, "model");
+    assert.equal(budget?.maxTokens, 8876);
+    assert.deepEqual(budget?.model, {
+      provider: model.provider,
+      modelId: model.id,
+      maxContextTokens: 10000,
+      reservedOutputTokens: 100,
+      safetyMarginTokens: 1024,
+    });
   } finally {
     registration.unregister();
   }
@@ -268,6 +321,87 @@ test("prints playground run and event store records", () => {
   }
 });
 
+test("playground uses one compact command for manual and automatic compaction", () => {
+  const cli = createCliInvocation();
+  const root = mkdtempSync(join(tmpdir(), "agent-core-playground-compact-"));
+  try {
+    const result = spawnSync(cli.command, [
+      ...cli.args,
+      "--faux",
+      "--faux-response",
+      "compact playground answer",
+      "--agent-playground",
+      "--playground-state-file",
+      join(root, "state.json")
+    ], {
+      encoding: "utf8",
+      input: [
+        "hello compact",
+        "/compact auto on",
+        "/compact auto protect 2",
+        "/compact status",
+        "/compact run keep 0",
+        "/runs",
+        "/exit",
+        ""
+      ].join("\n")
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /compact: auto=on, protectLast=2/);
+    assert.match(result.stdout, /compacted\./);
+    assert.match(result.stdout, /compaction stages:/);
+    assert.match(result.stdout, /"mode": "keep-last"/);
+    assert.match(result.stdout, /"runId": "playground-run-1"/);
+    assert.match(result.stdout, /"runId": "playground-run-2"/);
+    assert.equal(result.stdout.includes("/compaction"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("playground can use the LLM conversation summarizer for compaction", () => {
+  const cli = createCliInvocation();
+  const root = mkdtempSync(join(tmpdir(), "agent-core-playground-llm-compact-"));
+  try {
+    const result = spawnSync(cli.command, [
+      ...cli.args,
+      "--faux",
+      "--faux-response",
+      "first playground answer",
+      "--faux-response",
+      JSON.stringify({
+        summary: "LLM playground compacted summary",
+        facts: ["Playground selected durable history."],
+        decisions: [],
+        openQuestions: [],
+        currentTaskState: [],
+        risks: [],
+      }),
+      "--agent-playground",
+      "--playground-state-file",
+      join(root, "state.json")
+    ], {
+      encoding: "utf8",
+      input: [
+        "remember this durable playground fact",
+        "/compact summarizer llm",
+        "/compact run keep 0",
+        "/state",
+        "/exit",
+        ""
+      ].join("\n")
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /compact: auto=off, protectLast=6, summarizer=llm/);
+    assert.match(result.stdout, /compacted\./);
+    assert.match(result.stdout, /"summary": "LLM playground compacted summary\\n\\nFacts:\\n- Playground selected durable history\."/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function createCliInvocation() {
   const currentFile = fileURLToPath(import.meta.url);
   const testDirectory = dirname(currentFile);
@@ -347,6 +481,539 @@ test("runtime session queues concurrent prompts in FIFO order", async () => {
     ["second"]
   ]);
   assert.deepEqual(runtime.snapshot().transcriptRoles, ["user", "user"]);
+});
+
+test("runtime session compacts conversation entries without deleting source messages", async () => {
+  const firstMessage = createUserMessage("first");
+  const secondMessage = createUserMessage("second");
+  const recentMessage = createUserMessage("recent");
+  const beforeCompactionInputs: Array<{ reason: string; willRetry: boolean; metadata?: Record<string, unknown> }> = [];
+  const afterRunStatuses: string[] = [];
+  const loop = new FakeAgentLoop("adapter-compact-model", [
+    firstMessage,
+    secondMessage,
+    recentMessage,
+  ]);
+  const runtime = new AgentRuntimeSession(
+    "session-compact",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-compact:entry:1", null, firstMessage),
+        createTestMessageEntry("session-compact:entry:2", "session-compact:entry:1", secondMessage),
+        createTestMessageEntry("session-compact:entry:3", "session-compact:entry:2", recentMessage),
+      ],
+      leafId: "session-compact:entry:3",
+      messages: [firstMessage, secondMessage, recentMessage],
+      compatibility: { modelId: "adapter-compact-model" },
+    },
+    3,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [(input) => {
+        beforeCompactionInputs.push(input);
+        return { instructions: "Keep decisions." };
+      }],
+      afterRun: [({ status }) => {
+        afterRunStatuses.push(status);
+      }],
+    }),
+  );
+
+  const outcome = await runtime.execute({
+    type: "compact",
+    keepLastMessages: 1,
+  });
+  const state = runtime.exportState();
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.deepEqual(beforeCompactionInputs, [{
+    reason: "manual",
+    willRetry: false,
+    metadata: { keepLastMessages: 1 },
+  }]);
+  assert.deepEqual(afterRunStatuses, ["succeeded"]);
+  assert.equal(state.payload.entries.length, 4);
+  assert.equal(state.payload.entries[3]?.kind, "compaction");
+  assert.equal(state.payload.entries[3]?.parentId, "session-compact:entry:3");
+  assert.equal(state.payload.leafId, "session-compact:entry:4");
+  const compaction = state.payload.entries[3];
+  assert.equal(compaction?.kind, "compaction");
+  if (!compaction || !isConversationCompactionEntry(compaction)) {
+    assert.fail("Expected compaction entry.");
+  }
+  assert.deepEqual(compaction.payload.sourceEntryIds, [
+    "session-compact:entry:1",
+    "session-compact:entry:2",
+  ]);
+  assert.deepEqual(compaction.payload.preservedEntryIds, ["session-compact:entry:3"]);
+  assert.equal(compaction.payload.instructions, "Keep decisions.");
+  assert.deepEqual(
+    restoreConversationMessages(state, "adapter-compact-model").map(readTextFromMessage),
+    [
+      [
+        "此前对话摘要：",
+        "已压缩 2 条历史消息。",
+        "压缩指令：Keep decisions.",
+        "1. user: first",
+        "2. user: second",
+      ].join("\n"),
+      "recent",
+    ],
+  );
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    [
+      "此前对话摘要：",
+      "已压缩 2 条历史消息。",
+      "压缩指令：Keep decisions.",
+      "1. user: first",
+      "2. user: second",
+    ].join("\n"),
+    "recent",
+  ]);
+
+  const secondOutcome = await runtime.execute({
+    type: "compact",
+    keepLastMessages: 1,
+  });
+  const unchangedState = runtime.exportState();
+
+  assert.deepEqual(secondOutcome, { status: "succeeded" });
+  assert.equal(unchangedState.payload.entries.length, 4);
+});
+
+test("runtime session uses injected conversation summarizer for compaction", async () => {
+  const firstMessage = createUserMessage("first durable fact");
+  const recentMessage = createUserMessage("recent context");
+  const seenSourceTexts: string[][] = [];
+  const loop = new FakeAgentLoop("adapter-compact-summarizer-model", [
+    firstMessage,
+    recentMessage,
+  ]);
+  const runtime = new AgentRuntimeSession(
+    "session-compact-summarizer",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-compact-summarizer:entry:1", null, firstMessage),
+        createTestMessageEntry("session-compact-summarizer:entry:2", "session-compact-summarizer:entry:1", recentMessage),
+      ],
+      leafId: "session-compact-summarizer:entry:2",
+      messages: [firstMessage, recentMessage],
+      compatibility: { modelId: "adapter-compact-summarizer-model" },
+    },
+    2,
+    false,
+    undefined,
+    undefined,
+    {
+      conversationSummarizer: {
+        summarize(input) {
+          seenSourceTexts.push(input.sourceMessages.map((entry) => readTextFromMessage(entry.payload.message)));
+          return "LLM compacted durable fact";
+        },
+      },
+    },
+  );
+
+  const outcome = await runtime.execute({
+    type: "compact",
+    keepLastMessages: 1,
+  });
+  const state = runtime.exportState();
+  const compaction = state.payload.entries.find(isConversationCompactionEntry);
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.deepEqual(seenSourceTexts, [["first durable fact"]]);
+  assert.equal(compaction?.payload.summary, "LLM compacted durable fact");
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    "此前对话摘要：\nLLM compacted durable fact",
+    "recent context",
+  ]);
+});
+
+test("runtime session leaves conversation unchanged when compaction is cancelled", async () => {
+  const firstMessage = createUserMessage("first");
+  const secondMessage = createUserMessage("second");
+  const afterRunStatuses: string[] = [];
+  const loop = new FakeAgentLoop("adapter-compact-cancel-model", [
+    firstMessage,
+    secondMessage,
+  ]);
+  const runtime = new AgentRuntimeSession(
+    "session-compact-cancel",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-compact-cancel:entry:1", null, firstMessage),
+        createTestMessageEntry("session-compact-cancel:entry:2", "session-compact-cancel:entry:1", secondMessage),
+      ],
+      leafId: "session-compact-cancel:entry:2",
+      messages: [firstMessage, secondMessage],
+      compatibility: { modelId: "adapter-compact-cancel-model" },
+    },
+    2,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [() => ({ cancel: true })],
+      afterRun: [({ status }) => {
+        afterRunStatuses.push(status);
+      }],
+    }),
+  );
+
+  const outcome = await runtime.execute({
+    type: "compact",
+    keepLastMessages: 0,
+  });
+  const state = runtime.exportState();
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.deepEqual(afterRunStatuses, ["succeeded"]);
+  assert.deepEqual(state.payload.entries.map((entry) => entry.kind), ["message", "message"]);
+  assert.equal(state.payload.leafId, "session-compact-cancel:entry:2");
+});
+
+test("runtime session rejects manual compaction while a prompt is running", async () => {
+  const loop = new FakeAgentLoop("adapter-compact-running-model");
+  const idle = createDeferred<void>();
+  loop.waitForIdlePromises.push(idle.promise);
+  const runtime = new AgentRuntimeSession(
+    "session-compact-running",
+    loop,
+    emptyConversation("adapter-compact-running-model"),
+  );
+
+  const promptOutcome = runtime.execute({ type: "prompt", text: "long prompt" });
+  await waitForAsyncTurn();
+  const compactOutcome = await runtime.execute({ type: "compact" });
+  idle.resolve();
+
+  assert.deepEqual(compactOutcome, {
+    status: "failed",
+    errorCode: "INPUT_REJECTED",
+    message: "Cannot compact while a prompt turn is running.",
+  });
+  assert.deepEqual(await promptOutcome, { status: "succeeded" });
+});
+
+test("runtime session automatically compacts before pressured prompt turns", async () => {
+  const firstMessage = createUserMessage("first old decision");
+  const secondMessage = createUserMessage("second old decision");
+  const recentMessage = createUserMessage("recent decision");
+  const loop = new FakeAgentLoop("adapter-auto-compact-model", [
+    firstMessage,
+    secondMessage,
+    recentMessage,
+  ]);
+  const beforeCompactionInputs: unknown[] = [];
+  const afterRunStatuses: string[] = [];
+  const runtime = new AgentRuntimeSession(
+    "session-auto-compact",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-auto-compact:entry:1", null, firstMessage),
+        createTestMessageEntry("session-auto-compact:entry:2", "session-auto-compact:entry:1", secondMessage),
+        createTestMessageEntry("session-auto-compact:entry:3", "session-auto-compact:entry:2", recentMessage),
+      ],
+      leafId: "session-auto-compact:entry:3",
+      messages: [firstMessage, secondMessage, recentMessage],
+      compatibility: { modelId: "adapter-auto-compact-model" },
+    },
+    3,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [(input) => {
+        beforeCompactionInputs.push(input);
+        return { instructions: "Keep decisions compact." };
+      }],
+      afterRun: [({ status }) => {
+        afterRunStatuses.push(status);
+      }],
+    }),
+    "base system prompt",
+    {
+      contextBudget: new ContextBudget({
+        maxTokens: 230,
+        tokenEstimator: () => 40,
+      }),
+      policies: {
+        queue: "direct",
+        retry: "none",
+        compaction: createCompositeCompactionPolicy({
+          protectLastMessages: 1,
+          stages: [{ mode: "keep-last" }],
+        }),
+      },
+    },
+  );
+
+  const outcome = await runtime.execute({ type: "prompt", text: "continue from here" });
+  const state = runtime.exportState();
+  const compaction = state.payload.entries.find(isConversationCompactionEntry);
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.equal(beforeCompactionInputs.length, 1);
+  assert.deepEqual(beforeCompactionInputs[0], {
+    reason: "threshold",
+    willRetry: false,
+    metadata: {
+      status: "critical",
+      pressure: 206 / 230,
+      estimatedTokens: 206,
+      maxTokens: 230,
+      remainingTokens: 24,
+      targetTokens: 161,
+      protectLastMessages: 1,
+    },
+  });
+  assert.deepEqual(afterRunStatuses, ["succeeded"]);
+  assert.equal(compaction?.payload.reason, "threshold");
+  assert.equal(compaction?.payload.instructions, "Keep decisions compact.");
+  assert.deepEqual(compaction?.payload.sourceEntryIds, [
+    "session-auto-compact:entry:1",
+    "session-auto-compact:entry:2",
+  ]);
+  assert.deepEqual(compaction?.payload.preservedEntryIds, ["session-auto-compact:entry:3"]);
+  assert.deepEqual(loop.promptBatches.map((batch) => batch.map(readTextFromMessage)), [
+    ["continue from here"],
+  ]);
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    [
+      "此前对话摘要：",
+      "已压缩 2 条历史消息。",
+      "压缩指令：Keep decisions compact.",
+      "1. user: first old decision",
+      "2. user: second old decision",
+    ].join("\n"),
+    "recent decision",
+    "continue from here",
+  ]);
+});
+
+test("runtime session uses composite compaction policy for automatic source selection", async () => {
+  const smallOldMessage = createUserMessage("small old");
+  const largeOldMessage = createUserMessage("large old ".repeat(50));
+  const largeRecentMessage = createUserMessage("large recent ".repeat(50));
+  const loop = new FakeAgentLoop("adapter-composite-auto-compact-model", [
+    smallOldMessage,
+    largeOldMessage,
+    largeRecentMessage,
+  ]);
+  const beforeCompactionInputs: unknown[] = [];
+  const runtime = new AgentRuntimeSession(
+    "session-composite-auto-compact",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-composite-auto-compact:entry:1", null, smallOldMessage),
+        createTestMessageEntry("session-composite-auto-compact:entry:2", "session-composite-auto-compact:entry:1", largeOldMessage),
+        createTestMessageEntry("session-composite-auto-compact:entry:3", "session-composite-auto-compact:entry:2", largeRecentMessage),
+      ],
+      leafId: "session-composite-auto-compact:entry:3",
+      messages: [smallOldMessage, largeOldMessage, largeRecentMessage],
+      compatibility: { modelId: "adapter-composite-auto-compact-model" },
+    },
+    3,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [(input) => {
+        beforeCompactionInputs.push(input);
+      }],
+    }),
+    undefined,
+    {
+      contextBudget: new ContextBudget({
+        maxTokens: 100,
+        tokenEstimator: ({ text }) => text.length,
+      }),
+      policies: {
+        queue: "direct",
+        retry: "none",
+        compaction: createCompositeCompactionPolicy({
+          targetPressure: 0.7,
+          protectLastMessages: 1,
+          stages: [{ mode: "largest-first" }, { mode: "token-budget" }],
+        }),
+      },
+    },
+  );
+
+  const outcome = await runtime.execute({ type: "prompt", text: "continue" });
+  const state = runtime.exportState();
+  const compaction = state.payload.entries.find(isConversationCompactionEntry);
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.equal(beforeCompactionInputs.length, 1);
+  assert.deepEqual((beforeCompactionInputs[0] as { metadata: Record<string, unknown> }).metadata.targetTokens, 70);
+  assert.deepEqual(compaction?.payload.sourceEntryIds, [
+    "session-composite-auto-compact:entry:1",
+    "session-composite-auto-compact:entry:2",
+  ]);
+  assert.deepEqual(compaction?.payload.preservedEntryIds, ["session-composite-auto-compact:entry:3"]);
+  assert.equal(loop.snapshot().messages.map(readTextFromMessage).includes("large recent ".repeat(50)), true);
+});
+
+test("runtime session keeps automatic compaction disabled by default", async () => {
+  const firstMessage = createUserMessage("first old decision");
+  const secondMessage = createUserMessage("second old decision");
+  const loop = new FakeAgentLoop("adapter-auto-compact-disabled-model", [
+    firstMessage,
+    secondMessage,
+  ]);
+  const runtime = new AgentRuntimeSession(
+    "session-auto-compact-disabled",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-auto-compact-disabled:entry:1", null, firstMessage),
+        createTestMessageEntry("session-auto-compact-disabled:entry:2", "session-auto-compact-disabled:entry:1", secondMessage),
+      ],
+      leafId: "session-auto-compact-disabled:entry:2",
+      messages: [firstMessage, secondMessage],
+      compatibility: { modelId: "adapter-auto-compact-disabled-model" },
+    },
+    2,
+    false,
+    undefined,
+    "base system prompt",
+    {
+      contextBudget: new ContextBudget({
+        maxTokens: 20,
+        tokenEstimator: () => 40,
+      }),
+    },
+  );
+
+  const outcome = await runtime.execute({ type: "prompt", text: "continue" });
+  const state = runtime.exportState();
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.equal(state.payload.entries.some(isConversationCompactionEntry), false);
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    "first old decision",
+    "second old decision",
+    "continue",
+  ]);
+});
+
+test("runtime session continues pressured prompt turns when automatic compaction is cancelled", async () => {
+  const firstMessage = createUserMessage("first old decision");
+  const secondMessage = createUserMessage("second old decision");
+  const loop = new FakeAgentLoop("adapter-auto-compact-cancel-model", [
+    firstMessage,
+    secondMessage,
+  ]);
+  const beforeCompactionInputs: unknown[] = [];
+  const afterRunStatuses: string[] = [];
+  const runtime = new AgentRuntimeSession(
+    "session-auto-compact-cancel",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-auto-compact-cancel:entry:1", null, firstMessage),
+        createTestMessageEntry("session-auto-compact-cancel:entry:2", "session-auto-compact-cancel:entry:1", secondMessage),
+      ],
+      leafId: "session-auto-compact-cancel:entry:2",
+      messages: [firstMessage, secondMessage],
+      compatibility: { modelId: "adapter-auto-compact-cancel-model" },
+    },
+    2,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [(input) => {
+        beforeCompactionInputs.push(input);
+        return { cancel: true };
+      }],
+      afterRun: [({ status }) => {
+        afterRunStatuses.push(status);
+      }],
+    }),
+    undefined,
+    {
+      contextBudget: new ContextBudget({
+        maxTokens: 20,
+        tokenEstimator: () => 40,
+      }),
+      policies: {
+        queue: "direct",
+        retry: "none",
+        compaction: createCompositeCompactionPolicy({
+          protectLastMessages: 0,
+          stages: [{ mode: "keep-last" }],
+        }),
+      },
+    },
+  );
+
+  const outcome = await runtime.execute({ type: "prompt", text: "continue" });
+  const state = runtime.exportState();
+
+  assert.deepEqual(outcome, { status: "succeeded" });
+  assert.equal(beforeCompactionInputs.length, 1);
+  assert.equal(state.payload.entries.some(isConversationCompactionEntry), false);
+  assert.deepEqual(afterRunStatuses, ["succeeded"]);
+  assert.deepEqual(loop.snapshot().messages.map(readTextFromMessage), [
+    "first old decision",
+    "second old decision",
+    "continue",
+  ]);
+});
+
+test("runtime session reports automatic compaction hook failures as failed prompt turns", async () => {
+  const firstMessage = createUserMessage("first old decision");
+  const secondMessage = createUserMessage("second old decision");
+  const loop = new FakeAgentLoop("adapter-auto-compact-failure-model", [
+    firstMessage,
+    secondMessage,
+  ]);
+  const afterRunStatuses: string[] = [];
+  const runtime = new AgentRuntimeSession(
+    "session-auto-compact-failure",
+    loop,
+    {
+      entries: [
+        createTestMessageEntry("session-auto-compact-failure:entry:1", null, firstMessage),
+        createTestMessageEntry("session-auto-compact-failure:entry:2", "session-auto-compact-failure:entry:1", secondMessage),
+      ],
+      leafId: "session-auto-compact-failure:entry:2",
+      messages: [firstMessage, secondMessage],
+      compatibility: { modelId: "adapter-auto-compact-failure-model" },
+    },
+    2,
+    false,
+    createLifecycleRunner({
+      beforeCompaction: [() => {
+        throw new Error("compaction hook failed");
+      }],
+      afterRun: [({ status }) => {
+        afterRunStatuses.push(status);
+      }],
+    }),
+    undefined,
+    {
+      contextBudget: new ContextBudget({
+        maxTokens: 20,
+        tokenEstimator: () => 40,
+      }),
+      policies: {
+        queue: "direct",
+        retry: "none",
+        compaction: createCompositeCompactionPolicy({
+          protectLastMessages: 0,
+          stages: [{ mode: "keep-last" }],
+        }),
+      },
+    },
+  );
+
+  await assert.rejects(
+    () => runtime.execute({ type: "prompt", text: "continue" }),
+    /compaction hook failed/,
+  );
+  assert.deepEqual(afterRunStatuses, ["failed"]);
+  assert.deepEqual(loop.calls, []);
 });
 
 test("runtime session handles lifecycle-consumed input without entering the prompt queue", async () => {
@@ -1116,6 +1783,69 @@ test("StateExporter syncs loop snapshots into entry graph state", () => {
   assert.equal(state.payload.entries[1]?.parentId, "session-state-exporter:entry:1");
   assert.equal(readTextFromMessage(readEntryMessage(state.payload.entries[1]!)), "second");
   assert.equal(state.payload.leafId, "session-state-exporter:entry:2");
+});
+
+test("StateExporter syncs snapshots after compaction projection", () => {
+  const firstMessage = createUserMessage("first");
+  const secondMessage = createUserMessage("second");
+  const recentMessage = createUserMessage("recent");
+  const followUpMessage = createUserMessage("follow-up");
+  const exporter = new StateExporter({
+    sessionId: "session-state-exporter-compaction",
+    conversation: {
+      entries: [
+        createTestMessageEntry(
+          "session-state-exporter-compaction:entry:1",
+          null,
+          firstMessage,
+        ),
+        createTestMessageEntry(
+          "session-state-exporter-compaction:entry:2",
+          "session-state-exporter-compaction:entry:1",
+          secondMessage,
+        ),
+        createTestMessageEntry(
+          "session-state-exporter-compaction:entry:3",
+          "session-state-exporter-compaction:entry:2",
+          recentMessage,
+        ),
+        {
+          kind: "compaction",
+          id: "session-state-exporter-compaction:entry:4",
+          parentId: "session-state-exporter-compaction:entry:3",
+          createdAt: "2026-01-01T00:00:04.000Z",
+          payload: {
+            summary: "first and second were summarized",
+            sourceEntryIds: [
+              "session-state-exporter-compaction:entry:1",
+              "session-state-exporter-compaction:entry:2",
+            ],
+            reason: "manual",
+            createdBy: "runtime",
+            preservedEntryIds: ["session-state-exporter-compaction:entry:3"],
+          },
+        },
+      ],
+      leafId: "session-state-exporter-compaction:entry:4",
+      messages: [createUserMessage("此前对话摘要：\nfirst and second were summarized"), recentMessage],
+      compatibility: { modelId: "state-exporter-model" },
+    },
+  });
+
+  const state = exporter.exportState({
+    messages: [
+      createUserMessage("此前对话摘要：\nfirst and second were summarized"),
+      recentMessage,
+      followUpMessage,
+    ],
+    isStreaming: false,
+    modelId: "state-exporter-model",
+  });
+
+  assert.equal(state.payload.entries.length, 5);
+  assert.equal(state.payload.entries[4]?.kind, "message");
+  assert.equal(state.payload.entries[4]?.parentId, "session-state-exporter-compaction:entry:4");
+  assert.equal(readTextFromMessage(readEntryMessage(state.payload.entries[4]!)), "follow-up");
 });
 
 test("creates a runtime from tools resolved by the registry", async () => {

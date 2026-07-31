@@ -1,10 +1,13 @@
 import { type AgentConversationState } from "../contracts.js";
+import {
+  createConversationCompactionEntry,
+  type ConversationCompactionPlan,
+} from "../conversation/conversation-compactor.js";
 import type {
   ConversationEntry,
   ConversationEntryId,
 } from "../conversation/conversation-entry.js";
-import { isConversationMessageEntry } from "../conversation/conversation-entry.js";
-import { buildActiveEntries } from "../conversation/conversation-projector.js";
+import { ConversationProjector } from "../conversation/conversation-projector.js";
 import { exportConversationEntriesState } from "../conversation/conversation-state.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
 import type { AgentLoopSnapshot } from "./agent-loop.js";
@@ -30,6 +33,7 @@ export type StateExporterOptions = {
  */
 export class StateExporter {
   private readonly sessionId: string;
+  private readonly projector = new ConversationProjector();
   private entries: ConversationEntry[];
   private leafId: ConversationEntryId | null;
   private entrySequence: number;
@@ -48,15 +52,17 @@ export class StateExporter {
    * 比 active entries 更少，说明历史被意外截断，直接报错保护状态一致性。
    */
   syncFromSnapshot(snapshot: AgentLoopSnapshot) {
-    const activeEntries = buildActiveEntries(this.entries, this.leafId);
-    const activeMessageCount = activeEntries.filter(isConversationMessageEntry).length;
-    if (snapshot.messages.length < activeMessageCount) {
+    const projectedMessages = this.projector.projectMessages({
+      entries: this.entries,
+      leafId: this.leafId,
+    });
+    if (snapshot.messages.length < projectedMessages.length) {
       throw new Error(
         "Agent conversation graph cannot sync after message history shrank.",
       );
     }
 
-    const newMessages = snapshot.messages.slice(activeMessageCount);
+    const newMessages = snapshot.messages.slice(projectedMessages.length);
     for (const message of newMessages) {
       // 每条新增消息都挂到当前 leaf 后面，形成一条新的 active path。
       const entry: ConversationEntry = {
@@ -81,6 +87,27 @@ export class StateExporter {
       this.entries,
       this.leafId,
     );
+  }
+
+  /** 追加一条 compaction entry，并让当前 active leaf 指向它。 */
+  appendCompaction(plan: ConversationCompactionPlan): ConversationEntry {
+    const entry = createConversationCompactionEntry({
+      id: this.nextEntryId(),
+      parentId: this.leafId,
+      createdAt: new Date().toISOString(),
+      plan,
+    });
+    this.entries.push(entry);
+    this.leafId = entry.id;
+    return structuredClone(entry);
+  }
+
+  /** 按当前 entry graph 投影 LLM 可见 messages。 */
+  projectMessages() {
+    return this.projector.projectMessages({
+      entries: this.entries,
+      leafId: this.leafId,
+    });
   }
 
   /** 生成当前 session 内单调递增的 conversation entry id。 */

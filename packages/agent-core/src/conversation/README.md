@@ -38,6 +38,38 @@ The runtime keeps the full graph and exposes the active transcript by projection
 
 When a prompt appends new messages, each new entry points to the previous active `leafId`; the last appended entry becomes the next `leafId`.
 
+## Compaction Summaries
+
+Conversation compaction is split into two responsibilities:
+
+- `conversation-compactor` creates the compaction plan: selected source entries, preserved entries, reason, and stage audit output.
+- `ConversationSummarizer` creates the summary text for those selected source messages.
+
+The default summarizer is the deterministic fallback inside `conversation-compactor`. To use an LLM, create a `LlmConversationSummarizer` and pass it through `PiAgentRuntimeFactoryOptions.conversationSummarizer`:
+
+```ts
+const runtimeFactory = new PiAgentRuntimeFactory({
+  definition,
+  resolveApiKey,
+  conversationSummarizer: createLlmConversationSummarizer({
+    model: definition.model,
+    resolveApiKey,
+    outputFormat: "structured-json",
+    maxInputTokens: 24_000,
+    failureStrategy: "fallback-summary",
+  }),
+});
+```
+
+The LLM summarizer receives the original selected `ConversationMessageEntry[]` from the plan. It does not choose which messages to compress, and it does not mutate the append-only graph.
+By default it fails closed when the provider fails or its own prompt would exceed
+`maxInputTokens`; set `failureStrategy: "fallback-summary"` to explicitly fall
+back to the deterministic local summary instead.
+With `outputFormat: "structured-json"`, the model must return JSON containing
+`summary`, `facts`, `decisions`, `openQuestions`, `currentTaskState`, and
+`risks`; `LlmConversationSummarizer` validates that object and renders it into
+the text summary stored in the compaction entry.
+
 ## Runtime Assembly Boundary
 
 `RuntimeAssembler` is a composition layer, not the schema owner. It resolves the runtime model and Agent definition, passes the saved `AgentConversationState` to `ConversationStore.restore(...)`, and returns the restored conversation snapshot to the runtime.

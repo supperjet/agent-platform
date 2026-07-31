@@ -8,14 +8,25 @@ import {
   type AgentRuntimeEventListener,
   type AgentRuntimeMessageScope,
 } from "../contracts.js";
+import {
+  createConversationCompactionPlanWithSummarizer,
+  type ConversationSummarizer,
+} from "../conversation/conversation-compactor.js";
 import type { ConversationRuntimeState } from "../conversation/conversation-store.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { InputProcessor } from "../prompt/input-processor.js";
 import type { ProcessedInput } from "../prompt/input-processor.js";
 import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
 import type { AgentLoop, AgentLoopSnapshot } from "./agent-loop.js";
-import type { TurnContext } from "../context/context-assembler.js";
+import { ContextAssembler, type TurnContext } from "../context/context-assembler.js";
+import { ContextBudget } from "../context/context-budget.js";
+import {
+  createDefaultRuntimePolicies,
+  resolveCompactionPolicyDecision,
+  type RuntimePolicies,
+} from "../policies/runtime-policies.js";
 import { EventHub } from "./event-hub.js";
+import { createUserMessage } from "./messages.js";
 import { StateExporter } from "./state-exporter.js";
 import { TurnRunner } from "./turn-runner.js";
 
@@ -36,6 +47,12 @@ export type AgentRuntimeSessionOptions = {
    * 到当前 active turn，而不是变成 queued prompt。
    */
   maxQueuedTurns?: number;
+  /** 上下文预算估算器；通常由 factory 根据当前模型上下文窗口创建。 */
+  contextBudget?: ContextBudget;
+  /** 运行时策略；默认保持自动压缩关闭。 */
+  policies?: RuntimePolicies;
+  /** 会话压缩摘要器；未提供时使用内置纯文本 fallback。失败会让本次 compaction 停止写入。 */
+  conversationSummarizer?: ConversationSummarizer;
 };
 
 /**
@@ -130,6 +147,10 @@ export class AgentRuntimeSession extends AgentRuntime {
   private eventProcessingError: unknown;
   /** EventHub message id 的顺序游标，同时用于 messageOverrides 对齐 snapshot index。 */
   private nextMessageIndex: number;
+  private readonly contextBudget: ContextBudget;
+  private readonly policies: RuntimePolicies;
+  private readonly conversationSummarizer: ConversationSummarizer | undefined;
+  private readonly systemPrompt: string;
 
   constructor(
     private readonly sessionId: string,
@@ -145,6 +166,10 @@ export class AgentRuntimeSession extends AgentRuntime {
     this.maxPendingLoopEvents =
       options.maxPendingLoopEvents ?? DEFAULT_MAX_PENDING_LOOP_EVENTS;
     this.maxQueuedTurns = options.maxQueuedTurns ?? DEFAULT_MAX_QUEUED_TURNS;
+    this.contextBudget = options.contextBudget ?? new ContextBudget();
+    this.policies = options.policies ?? createDefaultRuntimePolicies();
+    this.conversationSummarizer = options.conversationSummarizer;
+    this.systemPrompt = systemPrompt ?? "";
     // 创建事件中心。EventHub 是底层 AgentEvent -> 公共 AgentRuntimeEvent 的唯一出口。
     this.eventHub = new EventHub({
       sessionId,
@@ -169,6 +194,10 @@ export class AgentRuntimeSession extends AgentRuntime {
     this.turnRunner = new TurnRunner({
       loop: this.loop,
       inputProcessor: this.inputProcessor,
+      contextAssembler: new ContextAssembler({
+        ...(this.lifecycleRunner ? { lifecycleRunner: this.lifecycleRunner } : {}),
+        contextBudget: this.contextBudget,
+      }),
       readExecutionOutcome: () => this.eventHub.readExecutionOutcome(),
       resolvePromptOutcome: (outcome) => this.resolvePromptOutcome(outcome),
       onContextAssembled: (context) => {
@@ -215,6 +244,9 @@ export class AgentRuntimeSession extends AgentRuntime {
 
   /** 执行一次外部 runtime 命令。 */
   async execute(command: AgentRuntimeCommand): Promise<AgentExecutionOutcome> {
+    if (command.type === "compact") {
+      return this.runManualCompaction(command);
+    }
     // onInput/基础 slash metadata 解析先于排队执行。这样 `/state`、`/context`、
     // `/reload` 等未来 handled input 可以立即返回，不会排在长时间 prompt 后面。
     const processedInput = await this.inputProcessor.process({ command });
@@ -348,7 +380,10 @@ export class AgentRuntimeSession extends AgentRuntime {
   ): Promise<AgentExecutionOutcome> {
     this.executionState = "running";
     this.activePromptAbortRequested = false;
+    let turnRunnerStarted = false;
     try {
+      await this.runAutomaticCompaction(input);
+      turnRunnerStarted = true;
       // 一个 prompt turn 的完整收尾顺序在 TurnRunner 回调里完成：
       // waitForIdle -> flush events -> cleanup transient context -> state sync -> afterRun。
       const outcome = await this.turnRunner.runProcessed(input);
@@ -356,6 +391,9 @@ export class AgentRuntimeSession extends AgentRuntime {
       return outcome;
     } catch (error) {
       this.executionState = "failed";
+      if (!turnRunnerStarted) {
+        await this.lifecycleRunner?.afterRun({ status: "failed" });
+      }
       throw error;
     } finally {
       this.startNextQueuedPrompt();
@@ -376,6 +414,119 @@ export class AgentRuntimeSession extends AgentRuntime {
     if (!next) return;
     // 后台启动下一轮，并把它的结果接回原 execute() promise。
     this.runPromptTurn(next.input).then(next.resolve, next.reject);
+  }
+
+  private async runManualCompaction(
+    command: Extract<AgentRuntimeCommand, { type: "compact" }>,
+  ): Promise<AgentExecutionOutcome> {
+    if (this.executionState !== "idle" && this.executionState !== "failed") {
+      return rejectRuntimeInput(
+        "INPUT_REJECTED",
+        "Cannot compact while a prompt turn is running.",
+      );
+    }
+
+    try {
+      await this.flushLoopEvents();
+      this.stateExporter.syncFromSnapshot(this.readLifecycleSnapshot());
+      const hookResult = await this.lifecycleRunner?.beforeCompaction({
+        reason: command.reason ?? "manual",
+        willRetry: false,
+        metadata: {
+          keepLastMessages: command.keepLastMessages,
+        },
+      });
+      if (hookResult?.cancel) {
+        await this.lifecycleRunner?.afterRun({ status: "succeeded" });
+        return { status: "succeeded" };
+      }
+
+      const currentState = this.stateExporter.exportState(this.readLifecycleSnapshot());
+      // manual compact 与 automatic compact 共用同一个 plan + summarizer 流程。
+      // summarizer 只负责生成 summary；压缩范围已经由 keepLastMessages / selection 决定。
+      const plan = await createConversationCompactionPlanWithSummarizer({
+        createdBy: "runtime",
+        entries: currentState.payload.entries,
+        leafId: currentState.payload.leafId,
+        reason: command.reason ?? "manual",
+        ...(hookResult?.instructions ? { instructions: hookResult.instructions } : {}),
+        ...(command.keepLastMessages === undefined
+          ? {}
+          : { keepLastMessages: command.keepLastMessages }),
+        ...(this.conversationSummarizer
+          ? { summarizer: this.conversationSummarizer }
+          : {}),
+      });
+      if (!plan) {
+        await this.lifecycleRunner?.afterRun({ status: "succeeded" });
+        return { status: "succeeded" };
+      }
+
+      this.stateExporter.appendCompaction(plan);
+      this.loop.replaceMessages(this.stateExporter.projectMessages());
+      this.messageOverrides.clear();
+      this.nextMessageIndex = this.loop.snapshot().messages.length;
+      await this.lifecycleRunner?.afterRun({ status: "succeeded" });
+      return { status: "succeeded" };
+    } catch (error) {
+      await this.lifecycleRunner?.afterRun({ status: "failed" });
+      return {
+        status: "failed",
+        errorCode: "COMPACTION_FAILED",
+        message: readErrorMessage(error),
+      };
+    }
+  }
+
+  private async runAutomaticCompaction(
+    input: Extract<ProcessedInput, { status: "ready" }>,
+  ): Promise<void> {
+    if (input.command.type !== "prompt") return;
+    const policy = this.policies.compaction;
+    if (policy === "disabled") return;
+
+    await this.flushLoopEvents();
+    this.stateExporter.syncFromSnapshot(this.readLifecycleSnapshot());
+    const projectedMessages = this.stateExporter.projectMessages();
+    const estimate = this.contextBudget.estimate(
+      [...projectedMessages, createUserMessage(input.command.text)],
+      { systemPrompt: this.systemPrompt },
+    );
+    const decision = resolveCompactionPolicyDecision(policy, estimate);
+    if (!decision) return;
+
+    const hookResult = await this.lifecycleRunner?.beforeCompaction({
+      reason: decision.reason,
+      willRetry: false,
+      metadata: decision.metadata,
+    });
+    if (hookResult?.cancel) return;
+
+    const currentState = this.stateExporter.exportState(this.readLifecycleSnapshot());
+    // 自动压缩先由 policy 解析出 selection，再交给 compactor 固定 source/preserved
+    // 边界；LLM summarizer 失败时不会 append compaction entry。
+    const plan = await createConversationCompactionPlanWithSummarizer({
+      entries: currentState.payload.entries,
+      leafId: currentState.payload.leafId,
+      reason: decision.reason,
+      ...(hookResult?.instructions ? { instructions: hookResult.instructions } : {}),
+      selection: {
+        ...decision.selection,
+        contextBudget: this.contextBudget,
+        nextMessages: [createUserMessage(input.command.text)],
+        ...(this.systemPrompt ? { systemPrompt: this.systemPrompt } : {}),
+      },
+      createdBy: "runtime",
+      ...(this.conversationSummarizer
+        ? { summarizer: this.conversationSummarizer }
+        : {}),
+    });
+    if (!plan) return;
+
+    this.stateExporter.appendCompaction(plan);
+    this.loop.replaceMessages(this.stateExporter.projectMessages());
+    this.messageOverrides.clear();
+    this.nextMessageIndex = this.loop.snapshot().messages.length;
   }
 
   /**

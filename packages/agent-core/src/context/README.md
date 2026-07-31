@@ -28,11 +28,15 @@ to keep debug visibility without treating transient context as transcript.
 
 The first diagnostics surface is `TurnContext.metadata.diagnostics`:
 
-- `budget`: message count and estimated characters from `ContextBudget`
+- `budget`: message count, character estimates, conservative token estimates,
+  model/input token budget, pressure status, compaction recommendation, and the
+  largest message contributors from `ContextBudget`
 - `injectedSources`: which extension points injected prompt, message, or
   metadata material
 - `persistentPromptMessageCount` and `transientPromptMessageCount`: how the
   prompt messages were scoped for persistence
 
-This keeps context observability available before real token budgeting,
-compaction, memory, and skill expansion are wired in.
+This keeps context observability available before automatic compaction, memory,
+and skill expansion are wired in. `ContextBudget` intentionally estimates token
+pressure; provider-specific tokenizer integration can replace the estimator
+later without changing the report shape.

@@ -25,7 +25,7 @@ test("restores entry payloads through the current leaf path", () => {
   assert.equal(snapshot.leafId, "branch");
 });
 
-test("restores v2 entries while projecting only message entries", () => {
+test("restores v2 entries while projecting compaction summaries", () => {
   const entries: ConversationEntry[] = [
     createMessageEntry("root", null, "user", "root prompt"),
     {
@@ -35,7 +35,9 @@ test("restores v2 entries while projecting only message entries", () => {
       createdAt: "2026-07-24T00:00:01.000Z",
       payload: {
         summary: "Earlier work was summarized.",
-        sourceEntryIds: ["root"]
+        sourceEntryIds: ["root"],
+        reason: "manual",
+        createdBy: "runtime"
       }
     },
     createMessageEntry("answer", "summary", "assistant", "answer after summary"),
@@ -77,8 +79,44 @@ test("restores v2 entries while projecting only message entries", () => {
     snapshot.entries.map((entry) => entry.id),
     ["root", "summary", "answer", "planner-state", "session-info", "future"]
   );
-  assert.deepEqual(snapshot.messages.map(readTestContent), ["root prompt", "answer after summary"]);
+  assert.deepEqual(snapshot.messages.map(readTestContent), [
+    "此前对话摘要：\nEarlier work was summarized.",
+    "answer after summary"
+  ]);
   assert.equal(snapshot.leafId, "future");
+});
+
+test("projects compaction summary in place of covered source messages without deleting entries", () => {
+  const entries: ConversationEntry[] = [
+    createMessageEntry("first", null, "user", "first prompt"),
+    createMessageEntry("second", "first", "assistant", "second answer"),
+    createMessageEntry("third", "second", "user", "recent prompt"),
+    {
+      kind: "compaction",
+      id: "summary",
+      parentId: "third",
+      createdAt: "2026-07-24T00:00:03.000Z",
+      payload: {
+        summary: "The user asked first; the assistant answered second.",
+        sourceEntryIds: ["first", "second"],
+        reason: "manual",
+        createdBy: "runtime",
+        preservedEntryIds: ["third"],
+        instructions: "Keep facts only."
+      }
+    }
+  ];
+  const state = exportConversationEntriesState("model-a", entries, "summary");
+  const store = new ConversationStore();
+
+  const snapshot = store.restore({ state, modelId: "model-a" });
+
+  assert.deepEqual(snapshot.entries.map((entry) => entry.id), ["first", "second", "third", "summary"]);
+  assert.deepEqual(snapshot.messages.map(readTestContent), [
+    "此前对话摘要：\nThe user asked first; the assistant answered second.",
+    "recent prompt"
+  ]);
+  assert.equal(state.payload.entries.length, 4);
 });
 
 test("restores empty state to an empty conversation snapshot", () => {
@@ -152,5 +190,15 @@ function createMessageEntry(
 }
 
 function readTestContent(message: AgentMessage): string {
-  return String((message as { content?: unknown }).content ?? "");
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.flatMap((part) => {
+      if (part && typeof part === "object" && "text" in part) {
+        return [String((part as { text: unknown }).text)];
+      }
+      return [];
+    }).join("");
+  }
+  return String(content ?? "");
 }

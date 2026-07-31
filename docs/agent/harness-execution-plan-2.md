@@ -160,25 +160,27 @@ TurnRunner           -> afterRun
 
 - `QueuePolicy`
 - `RetryPolicy`
-- `CompactionPolicy`
+- provider overflow 后的 bounded compact + retry recovery
 
-当前 `TurnRunner` 仍然是直接执行 command，没有真实运行中队列、重试、压缩后继续。
+当前 `TurnRunner` 仍然是直接执行 command，没有真实运行中队列和重试。自动
+compaction 已在 `AgentRuntimeSession` 的 prompt preflight 阶段接入。
 
 ### 3.2 Compaction
 
 已有：
 
-- `ContextBudget v1`
-- `beforeCompaction` hook 定义和 runner 方法
+- `ContextBudget v2` pressure diagnostics。
+- `ConversationCompactionEntry` 和 summary projection。
+- 手动 `/compact` command。
+- prompt 前 threshold/overflow preflight compaction。
+- composite source selection planner。
+- LLM-driven `ConversationSummarizer` 第一版，支持 fallback、输入预算和结构化输出。
+- `beforeCompaction` hook 的 manual / automatic 调用点。
 
 未实现：
 
-- 自动阈值压缩。
 - context overflow recovery。
-- 手动 compact command。
-- compaction entry。
-- compaction summary projection。
-- `beforeCompaction` 的真实调用点。
+- provider overflow error normalization 与 compact + retry 上限。
 
 ### 3.3 ResourceCatalog v2+
 
@@ -958,48 +960,447 @@ startedAt、endedAt、result/error 摘要和关联事件 id；它只用于 UI、
 
 目标：为后续多 session、队列恢复和审计留下稳定入口。
 
+当前状态：已完成第一版。`agent-core` 新增 `RuntimeStateStore` /
+`RuntimeLogStore` 接口、内存参照实现和 `assessRuntimeRecovery(...)` 恢复判定
+函数。runtime snapshot 记录 session id、status、active command、queued
+commands、last committed state version、dirty state 和 updatedAt；append-only
+runtime log 记录 session 级运行事件。恢复判定会把 active command 标记为
+`interrupted`，并明确 `shouldResumeActiveCommand: false`，不自动 replay。queued
+prompt 的恢复策略通过 `discard | preserve | host_decides` 显式表达，第一版默认
+交给宿主决定。playground 已接入 `/runtime` 和 `/runtimelog`，用于查看 runtime
+snapshot、恢复判定和 append-only log。
+
 工作项：
 
 - 定义 session runtime snapshot：session id、status、active command、
-  queued prompts、last committed state version、dirty flag。
-- 定义 append-only session log 的最小格式。
+  queued prompts、last committed state version、dirty flag。已完成。
+- 定义 append-only session log 的最小格式。已完成。
 - 明确恢复时 active command 的处理：默认标记 interrupted/unknown，不自动重放。
-- 后续再接入 lease、fork、import/switch session。
+  已完成。
+- 后续再接入 lease、fork、import/switch session。仍延后。
 
 验收：
 
-- session 可以从 runtime snapshot 判断是否 clean、dirty、interrupted。
-- queued prompts 的恢复策略明确：恢复、丢弃或交给宿主策略选择。
-- append-only log 能辅助审计，但不替代 canonical conversation state。
+- session 可以从 runtime snapshot 判断是否 clean、dirty、interrupted。已覆盖。
+- queued prompts 的恢复策略明确：恢复、丢弃或交给宿主策略选择。已覆盖
+  `queuedPromptPolicy`。
+- append-only log 能辅助审计，但不替代 canonical conversation state。已覆盖
+  append-only 顺序和唯一性。
 
 ### 阶段 E：ContextBudget / Compaction
 
 目标：让上下文预算和压缩成为 runtime 的正式能力。
 
+当前代码情况：
+
+- `ConversationCompactionEntry` 已扩展为 E.0 的第一版 payload 结构。
+- `ConversationProjector` 已支持 active path 上的 `compaction` entry：summary
+  会进入 LLM context，并替代被 `sourceEntryIds` 覆盖的旧 message entries。
+- `StateExporter` 当前会从 loop snapshot 追加 `message` entry，也已提供
+  append compaction entry 的入口；它能按 compaction projection 后的 LLM 可见
+  message 数量继续追加新 message。
+- `ContextBudget` 已升级为 v2：会基于模型上下文窗口估算输入 token、剩余预算、
+  pressure status、是否建议 compact 和最大消息来源。
+- `beforeCompaction` hook 已定义且 runner 已实现，manual compact 与 automatic
+  preflight compaction 都会调用它。
+- 自动 compaction 第一版已经接入 prompt 前 preflight；provider overflow 后的
+  bounded compact + retry recovery 仍留给后续 retry policy 阶段。
+- `AgentRuntimeCommand` 已包含 `prompt / steer / follow-up / compact / abort`。
+
+阶段 E 的原则：
+
+- 先实现 manual compact 与 projection 语义，再接自动 preflight compaction。
+- compaction entry 改变的是 LLM 可见上下文，不应破坏 canonical conversation
+  graph。
+- 第一版不物理删除旧 message entries；旧历史仍保留在 exported state 中用于
+  审计、诊断和未来 repair。
+- 摘要生成已经支持 deterministic fallback 和 LLM summarizer。第一版 LLM
+  summarizer 不参与 source selection，只负责把 compaction plan 选中的原始
+  messages 压缩成可投影 summary。
+
 建议顺序：
 
 ```text
-ContextBudget v2
-  -> manual compact command
-  -> compaction entry
-  -> beforeCompaction 接线
-  -> threshold / overflow compaction
+E.0 Compaction Semantics v1
+  -> E.1 Manual Compact Command
+  -> E.2 ContextBudget v2 / pressure diagnostics
+  -> E.3 Threshold / Overflow Compaction
+  -> E.4 Composite Source Selection Planner
+  -> E.5 LLM Conversation Summarizer
 ```
+
+##### E.0 Compaction Semantics v1
+
+状态：已完成第一版。
+
+目标：先定义 compaction 在 conversation graph 和 projection 中的语义，不急于
+接自动触发。
 
 工作项：
 
-- `ContextBudget` 从字符估算升级为 token 预算接口。
-- 支持手动 compact command。
-- ConversationProjector 支持 compaction entry。
-- 接入 `beforeCompaction`。
-- compaction result 写入持久化层。
-- context overflow 触发压缩恢复，而不是普通 retry。
+- 扩展 `ConversationCompactionEntry.payload`，明确第一版字段：
+  `summary`、`sourceEntryIds`、`reason`、`createdBy`、可选
+  `preservedEntryIds` 和 `instructions`。
+- 明确 `sourceEntryIds` 表示 summary 覆盖的 active path message entries。
+- 明确 compaction 不物理删除 source message entries，projection 层负责用
+  summary 替代被覆盖消息。
+- `ConversationProjector` 支持 compaction entry：遇到 active path 上的
+  compaction entry 时，投影一条 summary context message，并跳过
+  `sourceEntryIds` 覆盖的 message entries。
+- 定义 summary context message 的第一版格式，例如 user message：
+  `此前对话摘要：\n...`。后续可再抽象 system/context role。
+- 增加 projector 测试，覆盖：
+  - compaction entry 保留在 state graph 中。
+  - projection 使用 summary 替代 source messages。
+  - source messages 没有物理删除。
+  - unknown/custom/session entries 不污染 projection。
 
 验收：
 
-- 压缩前后 conversation state 合法。
-- compaction summary 能参与后续 ContextAssembler。
-- `beforeCompaction` 的结果被真实消费。
+- 一份包含 compaction entry 的 v2 state 可以 restore/export round-trip。
+- compaction summary 会进入后续 LLM context。
+- 被 compaction 覆盖的 source messages 不会和 summary 重复进入 projection。
+- 未覆盖的最近消息仍按原顺序投影。
+
+实现记录：
+
+- `ConversationCompactionEntry.payload` 已扩展为 `summary`、
+  `sourceEntryIds`、`reason`、`createdBy`、可选 `preservedEntryIds` 和
+  `instructions`。
+- restore validation 会校验 compaction payload 的必需字段。
+- `ConversationProjector` 会先分析 active path 上的 compaction 覆盖范围，再
+  在最早的 source message 位置插入 summary context message，格式为
+  `此前对话摘要：\n...`。
+- projection 会跳过 `sourceEntryIds` 覆盖的 message entries，但 state graph
+  中的 source message entries 仍然完整保留。
+- 已补充 conversation restore/projection 测试，覆盖 summary 替代、
+  source entries 保留、最近未覆盖消息保持原顺序，以及 custom/session/unknown
+  entries 不污染 projection。
+
+##### E.1 Manual Compact Command
+
+状态：已完成第一版。
+
+目标：提供手动压缩入口，验证 compaction graph 写入、hook 接线和恢复语义。
+
+工作项：
+
+- 扩展 `AgentRuntimeCommand`，新增 `{ type: "compact"; reason?: "manual";
+  keepLastMessages?: number }`。
+- 在 `AgentRuntimeSession.execute()` 或 `TurnRunner` 外层处理 compact command：
+  它不进入模型 loop，不创建普通 prompt turn。
+- 接入 `LifecycleRunner.beforeCompaction({ reason: "manual", willRetry: false })`。
+- 支持 `beforeCompaction` 返回 `cancel: true` 时取消本次 compact，并给出稳定
+  outcome。
+- 实现 deterministic summary generator，用于第一版手动压缩。它只基于已选中的
+  message entries 生成摘要，不调用模型。
+- 在 `StateExporter` 或独立 `ConversationCompactor` 中增加 append compaction
+  entry 的入口，并更新 leafId。
+- 明确压缩范围第一版策略：压缩 active path 中较早的 persistent message
+  entries，默认保留最近 N 条 message 原文。
+- playground 增加 `/compact run` 和可选参数，例如 `/compact run keep 6`，并能通过
+  `/state`、`/context` 或后续 projection debug 验证效果。
+- 确认 manual compact 会进入 exported conversation state，宿主现有
+  ConversationStore/LocalConversationStateStore 可以持久化它。
+
+验收：
+
+- 手动 compact 后，exported state 包含合法 compaction entry。
+- 下一轮 prompt 的 ContextAssembler 能看到 summary context，而不是重复旧历史。
+- `beforeCompaction` 的 cancel / instructions 被真实消费。
+- compact 不会污染 RunStore 中的普通 prompt run；如果需要诊断，先通过
+  EventStore/RuntimeLogStore 或 playground 输出验证。
+- failed/cancelled compact 不改变 conversation graph。
+
+实现记录：
+
+- `AgentRuntimeCommand` 已新增 `{ type: "compact"; reason?: "manual";
+  keepLastMessages?: number }`。
+- 新增 `ConversationCompactor`，负责选择 active path 中较早的 message entries、
+  生成 deterministic summary，并产出 compaction plan。默认保留最近 6 条
+  message 原文，`/compact run keep N` 可覆盖。
+- `StateExporter.appendCompaction(...)` 会追加 `kind: "compaction"` entry 并更新
+  `leafId`，不会删除或改写 source message entries。
+- `AgentRuntimeSession.execute({ type: "compact" })` 已接入：
+  - 不进入模型 loop。
+  - running prompt 期间拒绝 manual compact。
+  - 调用 `beforeCompaction({ reason: "manual", willRetry: false })`。
+  - 消费 hook `cancel` 与 `instructions`。
+  - compact 成功后用 compaction projection 更新底层 loop messages，使下一轮
+    `ContextAssembler` 能看到 summary context。
+  - failed/cancelled/no-op compact 不改变 conversation graph。
+- playground 已新增 `/compact run [keep N]`，并把 compact command 写入 RunStore、
+  RuntimeStateStore 和 RuntimeLogStore；成功后保存 LocalConversationStateStore。
+- 已补充 runtime session 测试，覆盖成功 compact、hook cancel、running reject
+  和 compaction projection 后继续导出的状态一致性。
+
+##### E.2 ContextBudget v2 / Pressure Diagnostics
+
+状态：已完成第一版。
+
+目标：把 budget 从简单字符统计升级为可配置预算接口，并先用于诊断，不自动压缩。
+
+工作项：
+
+- 扩展 `ContextBudgetEstimate`，保留字符估算，同时增加：
+  `estimatedTokens`、`maxTokens`、`remainingTokens`、`pressure`、`overflow` 等字段。
+- 定义 `ContextBudgetOptions`，允许注入 token estimator 或模型上下文上限。
+- 第一版 token estimator 可以继续基于字符粗估，但接口要允许后续替换。
+- `ContextAssembler` diagnostics 输出 budget pressure，并标记是否建议压缩。
+- playground `/context` 能看到 budget v2 诊断字段。
+- 不在 E.2 自动改写 messages，也不自动触发 compact。
+
+验收：
+
+- budget diagnostics 能区分 normal / pressured / overflow。
+- 没有配置 token estimator 时仍能稳定运行并使用默认估算。
+- budget v2 不改变现有 prompt/context 行为，只增加诊断信息。
+
+实现记录：
+
+- `ContextBudgetEstimate` 已保留 message count / 字符估算，并增加
+  `estimatedTokens`、`maxTokens`、`remainingTokens`、`pressure`、`overflow`、
+  `status`、`shouldCompact`、`recommendedAction`、`budgetSource`、`model` 和
+  `largestMessages`。
+- `ContextBudgetOptions` 已支持模型 profile、直接配置输入 token 上限、
+  reserved output、安全余量、warning/critical 阈值、自定义 token estimator
+  和最大消息来源数量。
+- 默认 token estimator 是保守字符粗估：中文按接近 1 token/字估算，英文、
+  空白和符号按不同密度估算，并为每条 message/system prompt 加结构开销。
+- `PiAgentRuntimeFactory` 会从当前模型的 `contextWindow` / `maxTokens` 创建
+  model-aware budget，并注入 `ContextAssembler`。
+- `ContextAssembler` 会把最终 `systemPrompt` 与 projected messages 一起纳入
+  预算诊断；`/context` 可看到 budget v2 字段。
+- E.2 不写入 conversation state，不触发 compact；自动 threshold/overflow
+  compaction 留给 E.3。
+
+##### E.3 Threshold / Overflow Compaction
+
+状态：已完成第一版。
+
+目标：在 E.0-E.2 稳定后，接入自动压缩策略，让 threshold/overflow 不再只是
+普通失败或无限增长。
+
+工作项：
+
+- 定义 `CompactionPolicy` 或 runtime policy 入口，支持 disabled / manual /
+  threshold / overflow 策略。
+- 当 ContextBudget 进入 threshold pressure 时，可在 prompt 前触发 compaction，
+  再重新组装 context。
+- 当 provider/context overflow 发生时，尝试 overflow compaction recovery，
+  而不是直接普通 retry。
+- 自动 compaction 同样调用 `beforeCompaction`，reason 分别为 `threshold` /
+  `overflow`，并明确 `willRetry`。
+- compaction result 写入 conversation state，并通过 RunStore/EventStore 或
+  RuntimeLogStore 记录诊断线索。
+- 防止 compaction loop：同一 prompt 的 overflow recovery 必须有最大尝试次数。
+- 明确自动 compaction 与 queued prompt、abort、commit_failed 的交互边界。
+
+验收：
+
+- context pressure 达到 threshold 时能生成 compaction entry 并继续 prompt。
+- overflow recovery 只尝试有边界的 compact + retry，不会无限循环。
+- 自动 compaction 后 exported state 合法，summary 参与后续 projection。
+- `beforeCompaction` 在 manual / threshold / overflow 三种 reason 下都有测试覆盖。
+
+实现记录：
+
+- `RuntimePolicies.compaction` 已从固定 `"disabled"` 升级为可配置策略：
+  默认仍然关闭；显式使用 `createCompositeCompactionPolicy(...)` 后才会在 prompt
+  前启用自动压缩。`threshold` / `overflow` 只是预算触发后的 compaction reason，
+  不再是独立 policy mode。
+- `AgentRuntimeSession` 现在持有和 `ContextAssembler` 相同的 `ContextBudget`，
+  并在 prompt turn 开始前用当前 conversation projection + 本轮 user prompt
+  做一次预算预检。
+- 当预算状态命中 compaction policy 的 pressure status 时，session 会：
+  - flush pending loop events，并把当前 loop snapshot 同步到 conversation graph。
+  - 调用 `beforeCompaction`，reason 为 `threshold` 或 `overflow`。
+  - 消费 hook 的 `cancel` 与 `instructions`。
+  - 生成 deterministic compaction plan，追加 compaction entry，并用 projection
+    替换底层 loop messages。
+  - 然后继续执行原 prompt turn。
+- 自动 compaction 是 prompt turn 的准备阶段，不单独发一个 `afterRun`；本轮 prompt
+  完成后由原有 TurnRunner 路径统一触发 `afterRun`、state sync 和 outcome。
+- 第一版没有做 provider overflow 失败后的 retry recovery；当前覆盖的是 prompt
+  前 threshold/overflow preflight compaction。真正的 provider error normalization
+  与 compact + retry 上限留给后续 retry policy 阶段。
+- 已补充 runtime session 测试，覆盖：
+  - 默认策略关闭时不触发自动压缩。
+  - pressure 达到 critical 时，prompt 前自动追加 compaction entry 并继续执行。
+  - `beforeCompaction` cancel 时跳过压缩但继续本轮 prompt。
+  - manual compact 的 `manual` reason 仍保持独立路径。
+- playground 的压缩入口已收敛到 `/compact` 命令族，自动压缩只使用 composite
+  policy。
+
+##### E.4 Composite Source Selection Planner
+
+状态：已完成第一版。
+
+目标：把“何时触发压缩”和“压缩哪些源消息”拆开，让自动压缩不再只依赖
+`keepLastMessages`，而是能根据 token 目标、消息角色、消息体积、工具调用依赖和
+recency 保护组合选择 source entries。
+
+核心判断：
+
+- `threshold / overflow` 是 trigger，不应同时承担 source selection 的职责。
+- source selection 的输出仍然是 `sourceEntryIds / preservedEntryIds`，这样 E.0
+  的 compaction projection 语义保持不变。
+- `tool_call -> tool_result` 必须作为 dependency-aware group 处理，避免投影中出现
+  “assistant 调用了工具，但工具结果消失了”的不连续上下文。
+- recency-weighted 不作为第一阶段单独执行；它应作为所有选择阶段的保护因子，
+  防止最近消息仅因为体积大或角色优先级低而被过早压缩。
+- 第一版 deterministic summarizer 继续保留。E.4 只升级 source selection；LLM
+  summarizer 另起阶段接入。
+
+工作项：
+
+- 新增 compaction source planner 数据结构：
+  `CompactionMessageGroup`、`CompactionSelectionStage`、`CompactionSelectionResult`。
+- active path 中已经被既有 compaction 覆盖的 message 不再作为候选。
+- 将消息按 dependency-aware group 建模：
+  - 普通 user / assistant / toolResult message 默认单独成组。
+  - 带 tool call 的 assistant message 与后续匹配 `toolCallId` 的 toolResult
+    message 组成不可拆分 group。
+  - 找不到 call 的孤立 toolResult 保守视为单独 group，但 role priority 更高，
+    便于后续策略优先压缩。
+- 支持 composite selection stages：
+- `keep-last`：选择最近 N 条之外的旧消息，用于手动 compact 或只想保留最近
+    N 条的 composite policy。
+  - `role-aware`：根据 role drop priority 选择更适合压缩的组。
+  - `largest-first`：优先选择 token 体积最大的组，同时用 recency 权重保护最近组。
+  - `token-budget`：最后手段，从较早消息开始选择，直到达到目标 token。
+- 支持 target：
+  - `targetTokens`：压缩后希望保留的输入 token 上限。
+  - `targetPressure`：基于当前 `ContextBudgetEstimate.maxTokens` 推导目标 token。
+  - 每个 stage 后重新计算已选择 token，达到目标即停止。
+- `RuntimeCompactionPolicy` 只保留 composite policy；`keep-last` 是 composite
+  stage，不再存在独立的 threshold policy mode 或 keep-last selection mode。
+- playground `/compact auto on` 默认使用 composite policy，
+  `/compact auto protect N` 映射到 `protectLastMessages`。
+
+验收：
+
+- automatic compaction 可以按 target pressure 选择 source entries，而不是只按
+  message 条数。
+- 工具调用消息和对应 tool result 不会被拆开压缩。
+- 最近 N 条消息受到硬保护；除此之外 recency 权重会软保护较新的候选。
+- 大消息在不破坏依赖和最近保护的前提下会被优先选择。
+- 现有 manual compact 和 automatic composite policy 测试继续通过。
+
+实现记录：
+
+- `ConversationCompactor` 已新增 composite source selection：
+  - 构建 `ConversationCompactionMessageGroup`，对普通 message 单独成组。
+  - assistant tool call 与后续匹配 `toolCallId` 的 toolResult 会进入同一个不可拆分
+    group。
+  - 已被既有 compaction 覆盖的 source message 不会再次成为候选。
+  - 最近 `protectLastMessages` 条 message 受到硬保护。
+- selector 支持四类 stage：
+  - `keep-last`：把“保留最近 N 条”收敛为 composite 内的一个 stage；manual compact
+    和“只保留最近 N 条”的自动策略都会使用它。
+  - `role-aware`：按 role drop priority 排序，默认优先压缩 `toolResult`，
+    其次 user，assistant 默认更受保护，以保留历史回答和多轮对话连贯性。
+  - `largest-first`：优先压缩 token 体积大的 group，同时用 recency 软保护最近
+    group。
+  - `token-budget`：最后按时间顺序兜底选择，直到接近目标。
+- recency-weighted 已作为 stage scoring 的保护因子接入，而不是独立第一阶段。
+- `RuntimePolicies.compaction` 已新增 `mode: "composite"`，并提供
+  `createCompositeCompactionPolicy(...)`。`createThresholdCompactionPolicy(...)` 和
+  `mode: "threshold"` 已删除。
+- 默认 composite stages 由 `createCompositeCompactionPolicy(...)` 填入：
+  `role-aware -> largest-first -> token-budget`。`conversation-compactor` 不再
+  隐式提供 runtime policy 默认 stage，只执行传入的 selection plan。
+- policy 层已新增 `resolveCompactionPolicyDecision(...)`，直接产出
+  `reason`、`targetTokens`、lifecycle metadata 和 compactor `selection` 参数；
+  runtime 不再手动从 policy 字段拼 `createConversationCompactionPlan(...)` 入参。
+- 自动 compaction 在 composite policy 下会根据 `targetTokens` 或
+  `targetPressure` 计算压缩目标，把本轮 prompt 也纳入预算预估，再调用
+  compactor planner 产出 source/preserved ids。
+- playground `/compact auto on` 默认启用 composite policy，目标约为 70%
+  context pressure；`/compact auto protect N` 表示最近 N 条 message 硬保护。
+- 已补充测试覆盖 dependency-aware tool call/tool result grouping、
+  largest-first + recency/recent hard protection，以及 runtime 自动 composite
+  compaction 接线。
+
+##### E.5 LLM Conversation Summarizer
+
+状态：已完成第一版。
+
+目标：在 E.0-E.4 已经明确 compaction graph 语义、source selection 和自动触发
+之后，引入模型驱动的摘要器，让压缩结果不再只是 deterministic 拼接文本，同时
+保持 source selection、审计记录和 append-only graph 的边界不变。
+
+核心判断：
+
+- LLM summarizer 不决定“压缩哪些消息”。它只接收 compaction plan 已经选中的
+  `sourceMessages`、`preservedMessages`、`sourceEntryIds`、`preservedEntryIds`
+  和 stage audit 信息。
+- compaction entry 仍然只写入一段 `summary` 文本，projection 仍通过
+  `此前对话摘要：\n...` 把 summary 注入后续上下文；结构化摘要先在 summarizer
+  内部校验并渲染成文本，不升级 conversation graph schema。
+- 默认策略应 fail-closed：模型摘要失败、返回空内容、返回非法结构化 JSON 或
+  摘要器输入超预算时，不应静默写入质量未知的 compaction entry。
+- fallback 只能显式开启：`failureStrategy: "fallback-summary"` 会回退到本地
+  deterministic summary，用于 playground 或体验阶段兜底。
+
+工作项：
+
+- 定义通用 `ConversationSummarizer` 接口，并让
+  `createConversationCompactionPlanWithSummarizer(...)` 在 source selection 后调用
+  它。
+- 实现 `LlmConversationSummarizer`：
+  - 通过 `completeSimple(...)` 调用配置的模型。
+  - 使用 `resolveApiKey` 获取 provider key，但不把 key 写入 conversation state。
+  - prompt 中包含 reason、instructions、source/preserved ids、stage audit 和原始
+    selected `ConversationMessageEntry` payload。
+  - 默认 `outputFormat: "text"`，可选 `outputFormat: "structured-json"`。
+  - `structured-json` 要求模型返回 `summary`、`facts`、`decisions`、
+    `openQuestions`、`currentTaskState`、`risks`，并校验后渲染成稳定文本。
+  - 支持 `maxInputTokens`，在调用模型前估算摘要器自身 system prompt + user
+    prompt，超预算时不调用 provider。
+  - 支持 `maxTokens`、`temperature`、`requestTimeoutMs` 和可选 `sessionId` 等模型
+    调用参数。
+- playground 增加 LLM summarizer 入口：
+  - `/compact summarizer llm|fallback|status`。
+  - CLI 启动参数 `--playground-compaction-summarizer <fallback|llm>`。
+  - playground 的 LLM summarizer 默认使用 `structured-json`，并基于模型
+    `contextWindow` 设置约 50% 的摘要器输入预算。
+- CLI faux provider 支持多次 `--faux-response`，便于测试“普通 prompt 响应”和
+  “LLM compaction summary 响应”两个模型调用。
+
+验收：
+
+- 手动 `/compact run` 和自动 compaction 都能通过 runtime/factory 注入的
+  summarizer 生成 summary。
+- LLM summarizer 收到的是原始 selected messages，而不是 deterministic summary
+  文本。
+- provider error、空 summary、非法 structured JSON 和输入超预算默认会使本次
+  compaction 失败，不写入 compaction entry。
+- 显式 `failureStrategy: "fallback-summary"` 时，上述失败可以回退到本地
+  deterministic summary。
+- playground 中切换 `/compact summarizer llm` 后，`/compact run` 会写入结构化
+  JSON 渲染后的 summary 文本。
+
+实现记录：
+
+- 新增 `packages/agent-core/src/conversation/llm-conversation-summarizer.ts`。
+- `ConversationCompactor` 已导出 `summarizeConversationMessages(...)`，供 LLM
+  fallback 复用同一套 deterministic summary 行为。
+- `AgentRuntimeSession` 和 `PiAgentRuntimeFactory` 已支持注入
+  `conversationSummarizer`；manual compact 与 automatic preflight compaction
+  共用同一路径。
+- playground `/compact` 命令族已保留为唯一压缩入口，并扩展
+  `summarizer llm|fallback|status` 子命令。
+- 已补充测试覆盖：
+  - LLM prompt 包含 selected 原始消息且不包含 preserved 最近消息。
+  - provider error 默认失败和显式 fallback。
+  - 摘要器输入超预算默认失败且不调用 provider，以及显式 fallback。
+  - structured JSON 成功渲染、非法 JSON 默认失败和显式 fallback。
+  - playground 真实入口使用 LLM summarizer 写入结构化渲染结果。
+- 后续需要用真实长对话继续调参：重点观察 summary/facts/decisions/openQuestions/
+  currentTaskState/risks 的字段分工、二次压缩后的语义连续性、tool result 事实
+  保留情况，以及 `temperature`、`maxTokens`、`maxInputTokens` 和 system prompt 的
+  最佳组合。
 
 ### 阶段 F：Memory v1
 

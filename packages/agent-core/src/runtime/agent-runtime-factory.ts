@@ -8,7 +8,10 @@ import type { AgentResourceRegistry } from "../resources/resource-catalog.js";
 import type { AgentToolRegistry } from "../tools/tool-registry.js";
 import type { ToolRuntime } from "../tools/tool-runtime.js";
 import type { LifecycleHooks } from "../lifecycle/lifecycle-hooks.js";
+import type { RuntimePolicies } from "../policies/runtime-policies.js";
+import type { ConversationSummarizer } from "../conversation/conversation-compactor.js";
 import { createLifecycleRunner } from "../lifecycle/lifecycle-runner.js";
+import { createContextBudgetForModel } from "../context/context-budget.js";
 import { AgentLoopAdapter } from "./agent-loop-adapter.js";
 import { AgentRuntimeSession } from "./agent-runtime-session.js";
 import { RuntimeAssembler } from "./runtime-assembler.js";
@@ -31,6 +34,10 @@ export type PiAgentRuntimeFactoryOptions = {
   toolRuntime?: ToolRuntime;
   /** 可选内部生命周期 hooks；由 factory 接入 TurnRunner 和默认 ToolRuntime。 */
   lifecycleHooks?: LifecycleHooks;
+  /** 可选运行时策略；默认保持 queue direct / retry none / compaction disabled。 */
+  policies?: RuntimePolicies;
+  /** 可选会话压缩摘要器；用于把 compaction plan 选出的原始 messages 压成 summary。 */
+  conversationSummarizer?: ConversationSummarizer;
   /** Provider HTTP request timeout in milliseconds. */
   requestTimeoutMs?: number;
   /** Provider API key 解析函数，避免 key 进入 client/public event。 */
@@ -66,10 +73,11 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
     if (this.options.toolRegistry) {
       assemblerParams.toolRegistry = this.options.toolRegistry;
     }
-    if (this.options.toolRuntime || this.options.lifecycleHooks) {
+    if (this.options.toolRuntime || this.options.lifecycleHooks || this.options.policies) {
       assemblerParams.services = {
         ...(this.options.toolRuntime ? { toolRuntime: this.options.toolRuntime } : {}),
         ...(this.options.lifecycleHooks ? { lifecycleHooks: this.options.lifecycleHooks } : {}),
+        ...(this.options.policies ? { policies: this.options.policies } : {}),
       };
     }
 
@@ -112,6 +120,20 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
       true,
       createLifecycleRunner(assembly.lifecycle),
       assembly.systemPrompt,
+      {
+        contextBudget: createContextBudgetForModel({
+          provider: assembly.model.provider,
+          modelId: assembly.model.id,
+          maxContextTokens: assembly.model.contextWindow,
+          maxOutputTokens: assembly.model.maxTokens,
+        }),
+        policies: assembly.policies,
+        // summarizer 是会话级依赖：manual compact 与 automatic preflight compact
+        // 都通过 AgentRuntimeSession 统一调用，factory 不参与具体 source selection。
+        ...(this.options.conversationSummarizer
+          ? { conversationSummarizer: this.options.conversationSummarizer }
+          : {}),
+      },
     );
 
     // 如果 factory 级别传入 onEvent，就自动订阅这个 runtime 的公共事件流。

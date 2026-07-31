@@ -182,6 +182,15 @@ export class TurnRunner {
         await this.options.lifecycleRunner?.afterRun({ status: "succeeded" });
         return { status: "succeeded" };
       }
+      if (effectiveCommand.type === "compact") {
+        afterRunNotified = true;
+        await this.options.lifecycleRunner?.afterRun({ status: "failed" });
+        return {
+          status: "failed",
+          errorCode: "INPUT_REJECTED",
+          message: "Manual compaction must be handled by AgentRuntimeSession.",
+        };
+      }
       // abort 不一定立刻让底层 agent 停止；这里只表示中止请求已发出。
       // 直接调用 TurnRunner 的 abort 会立即通知 afterRun(aborted)；通过
       // AgentRuntimeSession abort active prompt 时，则由 session 在 prompt 收尾时

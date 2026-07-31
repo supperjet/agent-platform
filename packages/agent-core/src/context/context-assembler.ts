@@ -20,7 +20,7 @@ export type ContextAssemblerInput = {
 export type TurnContextMetadata = {
   /** beforeRun / beforeContext hook 写入的运行期元数据。 */
   hooks?: Record<string, unknown>;
-  /** 第一版上下文预算估算结果，只用于观测，不做裁剪。 */
+  /** 上下文预算估算结果，只用于观测，不做裁剪。 */
   budget: ContextBudgetEstimate;
   /** 面向诊断和观测的上下文装配摘要。 */
   diagnostics: ContextAssemblyDiagnostics;
@@ -52,7 +52,7 @@ export type TurnContext = {
 export type ContextAssemblerOptions = {
   /** 生命周期执行器；ContextAssembler 负责 beforeRun / beforeContext 两个控制点。 */
   lifecycleRunner?: LifecycleRunner;
-  /** 上下文预算估算器；第一版默认只统计数量和字符数。 */
+  /** 上下文预算估算器；默认使用保守 token 估算。 */
   contextBudget?: ContextBudget;
 };
 
@@ -129,7 +129,7 @@ export class ContextAssembler {
       hookMetadata = mergeMetadata(hookMetadata, beforeContextResult.metadata);
       injectedSources.push("lifecycle.beforeContext.metadata");
     }
-    const budget = this.contextBudget.estimate(contextMessages);
+    const budget = this.contextBudget.estimate(contextMessages, { systemPrompt });
     const persistentPromptMessageIndexes = findPromptMessageIndexes(
       promptMessages,
       persistentPromptMessages,
