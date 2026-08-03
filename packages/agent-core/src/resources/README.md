@@ -41,7 +41,7 @@ Catalog 负责：
 
 - 校验 resource name。
 - 输出 `promptFragments` 给 `PromptAssembler`。
-- 输出 `resourceInfos`、`contextFilePaths`、`skillNames`、`diagnostics` 给调试和 UI。
+- 输出 `resourceInfos`、`contextFilePaths`、`diagnostics` 给调试和 UI。
 
 Catalog 不负责文件扫描；文件扫描只属于 `ResourceLoader`。
 
@@ -59,8 +59,12 @@ agent/
       MEMORY.md
     references/
       architecture.md
-    prompt-templates/
+  prompt/
+    templates/
       review.md
+    system/
+      base.md
+      extra.md
   skills/
     debugging/
       SKILL.md
@@ -74,8 +78,12 @@ agent/
   model、启用资源、启用 skills、启用 tools、policies、lifecycle hooks 和
   runtime options。
 - `agent/resources/` 只放可序列化文本资源。
-- `agent/skills/` 放 `SKILL.md` 风格能力说明。当前只发现和读取，选择与展开留给
- 后续 Skill/InputProcessor/ContextAssembler 阶段。
+- `agent/prompt/templates/` 放按需激活的任务模板，后续由 PromptTemplate 模块
+  渲染为 user prompt 或 run-level instruction，不进入 ResourceLoader。
+- `agent/prompt/system/` 是未来 prompt 装配配置入口，暂不实现，也不进入
+  ResourceLoader。
+- `agent/skills/` 放 `SKILL.md` 风格能力说明，后续由 Skill 模块发现、选择和
+  激活，不进入 ResourceLoader。
 - `agent/tools/` 放可执行工具定义，不进入 `ResourceLoader` 或 `ResourceCatalog`。
 
 ## LoadedResourceKind
@@ -88,12 +96,6 @@ agent/
   表达“已经知道什么”。第一版只读，不自动写入。
 - `reference`：普通参考材料，例如项目文档、架构说明、领域背景。
   表达“可参考的信息”，不是规则，也不是长期记忆。
-- `prompt-template`：可由 slash command 或输入处理选择的提示模板。
-  ResourceLoader 只加载模板文本，不执行模板展开。
-- `skill`：可按需展开的能力说明，例如 `SKILL.md`。
-  ResourceLoader 只负责发现和读取，不负责选择或激活。
-- `system-prompt`：替换基础 system prompt 的文本来源。
-- `append-system-prompt`：追加到基础 system prompt 的文本来源。
 
 当前 `ResourceLoader` 支持以下目录：
 
@@ -102,12 +104,9 @@ agent/
 | `resources/instructions/` | `instruction` | 是 |
 | `resources/memory/` | `memory` | 是 |
 | `resources/references/` | `reference` | 是 |
-| `resources/prompt-templates/` | `prompt-template` | 否 |
-| `skills/` | `skill` | 否 |
 
-`prompt-template` 和 `skill` 会被 `ResourceLoader.load()` 发现，但
-`createRegistry()` 不会把它们注册成直接注入 prompt 的资源。后续选择与展开应由
-Skill / Prompt Template 模块处理。
+`prompt/templates/`、`prompt/system/` 和 `skills/` 都不属于 ResourceLoader。
+后续选择、展开和按需注入应由 Prompt / Skill 模块处理。
 
 ## Prompt 边界
 
@@ -194,6 +193,5 @@ Resource 层不会直接打印错误或退出进程。读取失败、重复资�
 - 支持 global / workspace / project / explicit 多 scope。
 - 支持 frontmatter 覆盖 `kind`、`priority`、`label`、`scope`。
 - 支持 resource reload。
-- 支持 `system-prompt` / `append-system-prompt` 文件发现。
-- 支持 prompt-template expansion 和 skill activation，但这些能力应在对应模块中
-  实现，而不是放进 ResourceLoader。
+- 支持 PromptTemplateLoader 和 SkillLoader，但这些能力应在对应模块中实现，而
+  不是放进 ResourceLoader。

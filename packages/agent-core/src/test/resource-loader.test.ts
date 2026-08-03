@@ -21,7 +21,8 @@ test("ResourceLoader discovers text resources by agent directory convention", ()
     writeResource(agentDir, "resources/instructions/AGENTS.md", "Use two-space indentation.");
     writeResource(agentDir, "resources/memory/MEMORY.md", "User prefers concise answers.");
     writeResource(agentDir, "resources/references/architecture.md", "Core owns runtime assembly.");
-    writeResource(agentDir, "resources/prompt-templates/review.md", "Review this change.");
+    writeResource(agentDir, "prompt/templates/review.md", "Review this change.");
+    writeResource(agentDir, "prompt/system/base.md", "Base prompt belongs to prompt assembly.");
     writeResource(agentDir, "skills/debugging/SKILL.md", "Debug with a narrow reproduction.");
     writeResource(agentDir, "tools/query.ts", "export const query = () => undefined;");
 
@@ -60,34 +61,23 @@ test("ResourceLoader discovers text resources by agent directory convention", ()
         label: "architecture",
         content: "Core owns runtime assembly.",
         loadedAt: "2026-07-31T00:00:00.000Z"
-      },
-      {
-        kind: "prompt-template",
-        name: "prompt-template:resources/prompt-templates/review",
-        label: "review",
-        content: "Review this change.",
-        loadedAt: "2026-07-31T00:00:00.000Z"
-      },
-      {
-        kind: "skill",
-        name: "skill:skills/debugging/SKILL",
-        label: "SKILL",
-        content: "Debug with a narrow reproduction.",
-        loadedAt: "2026-07-31T00:00:00.000Z"
       }
     ]);
     assert.equal(snapshot.resources.some((resource) => resource.sourceInfo.path?.includes("tools/query.ts")), false);
+    assert.equal(snapshot.resources.some((resource) => resource.sourceInfo.path?.includes("prompt/templates/review.md")), false);
+    assert.equal(snapshot.resources.some((resource) => resource.sourceInfo.path?.includes("prompt/system/base.md")), false);
+    assert.equal(snapshot.resources.some((resource) => resource.sourceInfo.path?.includes("skills/debugging/SKILL.md")), false);
   } finally {
     rmSync(agentDir, { recursive: true, force: true });
   }
 });
 
-test("ResourceLoader creates a registry from directly injectable text resources", () => {
+test("ResourceLoader creates a registry from context text resources", () => {
   const agentDir = createTempAgentDir();
   try {
     writeResource(agentDir, "resources/instructions/AGENTS.md", "Follow project rules.");
     writeResource(agentDir, "resources/memory/MEMORY.md", "Remember project decisions.");
-    writeResource(agentDir, "resources/prompt-templates/plan.md", "Make a plan.");
+    writeResource(agentDir, "prompt/templates/plan.md", "Make a plan.");
     writeResource(agentDir, "skills/review/SKILL.md", "Review carefully.");
 
     const registry = new ResourceLoader({
@@ -178,13 +168,13 @@ test("ToolsLoader can create an agent-only registry without built-in tools", asy
   }
 });
 
-test("ResourceCatalog injects loaded context resources without treating skills or templates as prompt fragments", () => {
+test("ResourceCatalog injects loaded context resources while prompt and skill files stay outside resources", () => {
   const registration = registerFauxProvider({ provider: "resource-loader-test" });
   const agentDir = createTempAgentDir();
   try {
     writeResource(agentDir, "resources/instructions/AGENTS.md", "Follow project rules.");
     writeResource(agentDir, "resources/memory/MEMORY.md", "Project chose ResourceLoader first.");
-    writeResource(agentDir, "resources/prompt-templates/plan.md", "Make a plan.");
+    writeResource(agentDir, "prompt/templates/plan.md", "Make a plan.");
     writeResource(agentDir, "skills/review/SKILL.md", "Review carefully.");
     const registryResource = defineAgentResource({
       name: "runtime_notes",
@@ -240,7 +230,6 @@ test("ResourceCatalog injects loaded context resources without treating skills o
       join(agentDir, "resources/instructions/AGENTS.md"),
       join(agentDir, "resources/memory/MEMORY.md")
     ]);
-    assert.deepEqual(snapshot.skillNames, []);
     assert.equal(snapshot.loadedResources.length, 0);
     assert.deepEqual(snapshot.diagnostics, []);
   } finally {

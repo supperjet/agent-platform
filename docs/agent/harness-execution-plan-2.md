@@ -206,18 +206,12 @@ ResourceLoader 的产物必须是可序列化、可审计、无执行闭包的�
   表达“应该怎么工作”，可包含编码约定、安全要求、测试命令、协作规则。
 - `memory`：长期事实和偏好，例如 `MEMORY.md`。表达“已经知道什么”，可包含
   用户偏好、项目决策、历史踩坑、重要背景；第一版只读，不自动写入。
-- `skill`：可按需展开的能力说明，例如 `SKILL.md`。表达“当某类任务出现时，
-  应按这套流程/参考材料工作”；发现和加载属于 Resource 层，选择和展开由
-  InputProcessor / ContextAssembler 后续阶段处理。
-- `prompt-template`：可由 slash command 或输入处理选择的提示模板。表达“如何把
-  某类用户输入转换为结构化任务提示”；加载模板文本，不在 ResourceLoader 中执行
-  template expansion。
 - `reference`：普通参考材料，例如显式配置的项目文档、README 摘要或领域说明。
   表达“可参考的信息”，不具备规则优先级，也不代表长期记忆。
-- `system-prompt`：替换基础 system prompt 的文本来源。一个 runtime 组装中最多应
-  解析出一个最终有效值；冲突需要 diagnostics。
-- `append-system-prompt`：追加到基础 system prompt 的文本来源。可有多个，按来源
-  顺序拼接，适合轻量附加说明。
+
+`prompt-template`、`system-prompt`、`append-system-prompt` 和 `skill` 不属于
+`LoadedResourceKind`。它们有独立语义：template 是一次任务的输入生成器，
+system prompt 是 PromptAssembler 的装配配置，skill 是可激活能力包。
 
 后期 agent 应用推荐使用文件夹区分资源类型，`index.ts` 作为主要应用入口和
 composition root：
@@ -225,6 +219,12 @@ composition root：
 ```text
 agent/
   index.ts
+  prompt/
+    templates/
+      review.md
+    system/
+      base.md
+      extra.md
   resources/
   skills/
   tools/
@@ -238,9 +238,12 @@ agent/
 - `agent/resources/`：只放可序列化、可审计、无执行闭包的文本资源。这里的内容
   进入 ResourceLoader / ResourceCatalog，可以被序列化为 diagnostics 或
   resource snapshot。
-- `agent/skills/`：放 `SKILL.md` 风格的流程型能力说明。发现和读取属于
-  ResourceLoader，具体选择、展开和按需注入由后续 Skill / Prompt Template
-  阶段处理。
+- `agent/prompt/templates/`：放可由 slash command、workflow 或输入处理器按需
+  渲染成 user prompt 的任务模板。不进入 ResourceLoader。
+- `agent/prompt/system/`：未来 prompt 装配配置入口，可用于 base / extra system
+  prompt。暂不实现，不进入 ResourceLoader。
+- `agent/skills/`：放 `SKILL.md` 风格的流程型能力说明。发现、选择、展开和
+  按需注入由后续 Skill 模块处理，不进入 ResourceLoader。
 - `agent/tools/`：放可执行工具定义。它们进入 `ToolRegistry` / `ToolCatalog` /
   `ToolRuntime`，不进入 ResourceLoader / ResourceCatalog。
 
@@ -255,8 +258,6 @@ agent/resources/
     MEMORY.md
   references/
     architecture.md
-  prompt-templates/
-    review.md
 ```
 
 核心约束：`agent/resources/` 中的所有内容必须能被 JSON 序列化后展示、审计
@@ -1506,8 +1507,7 @@ Resource 层职责边界：
 - 读取文本资源，保留 path、kind、scope、source、priority、loadedAt 等
   metadata。
 - 分类文本资源，并严格遵守 3.3 中 `LoadedResourceKind` 的语义：
-  `instruction`、`memory`、`skill`、`prompt-template`、`reference`、
-  `system-prompt`、`append-system-prompt`。
+  `instruction`、`memory`、`reference`。
 - 排序文本资源：global -> project -> cwd-nearest，或按显式 priority。
 - 产出结构化 diagnostics：missing、read failure、duplicate、conflict、
   over budget、disabled。
@@ -1528,14 +1528,18 @@ Resource 层明确不负责：
 ```text
 agent/
   index.ts
+  prompt/
+    templates/
+      *.md
+    system/
+      base.md
+      extra.md
   resources/
     instructions/
       AGENTS.md
     memory/
       MEMORY.md
     references/
-      *.md
-    prompt-templates/
       *.md
   skills/
     <skill-name>/
@@ -1552,10 +1556,12 @@ agent/
 - `agent/resources/instructions/` 对应 `instruction`，用于规则、约定、工作方式。
 - `agent/resources/memory/` 对应 `memory`，用于 `MEMORY.md` 等长期事实和偏好。
 - `agent/resources/references/` 对应 `reference`，用于普通项目文档和领域材料。
-- `agent/resources/prompt-templates/` 对应 `prompt-template`，只加载模板文本，
-  expansion 由 InputProcessor / template 模块负责。
-- `agent/skills/` 放 `SKILL.md` 风格能力说明。ResourceLoader 可以发现和读取，
-  但 skill 选择、展开和激活上下文由后续 Skill 模块负责。
+- `agent/prompt/templates/` 放 prompt 宏/模板，按需激活，后续由
+  PromptTemplateLoader / InputProcessor / workflow 渲染为 user prompt。
+- `agent/prompt/system/` 是可选预留目录，未来由 PromptLoader / PromptAssembler
+  处理 base / extra system prompt，不进入 ResourceLoader。
+- `agent/skills/` 放 `SKILL.md` 风格能力说明。Skill 发现、选择、展开和激活
+  上下文由后续 Skill 模块负责，不进入 ResourceLoader。
 - `agent/tools/` 放可执行工具定义，只进入 ToolRegistry / ToolCatalog /
   ToolRuntime，不进入 ResourceLoader / ResourceCatalog。
 
@@ -1594,7 +1600,6 @@ LoadedResource schema
 - 实现 ResourceLoader v1，先支持 workspace 文件发现和读取。
 - 扫描 `AGENTS.md` / `CLAUDE.md`，归类为 `instruction`。
 - 预留 `MEMORY.md`，归类为 `memory`，具体 memory 语义在阶段 G 收口。
-- 预留 `SKILL.md` 和 prompt templates 的 kind，但不急于实现完整 expansion。
 - ResourceCatalog v2 接收 ResourceLoader 输出，完成校验、去重、排序和解析。
 - PromptAssembler / ContextAssembler 消费 resource snapshot，而不是直接读文件。
 - 支持 resource reload。

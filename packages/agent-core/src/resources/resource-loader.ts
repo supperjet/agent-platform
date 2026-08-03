@@ -16,11 +16,7 @@ import {
 export type LoadedResourceKind =
   | "instruction"
   | "memory"
-  | "skill"
-  | "prompt-template"
-  | "reference"
-  | "system-prompt"
-  | "append-system-prompt";
+  | "reference";
 
 export type LoadedResourceScope = "global" | "project" | "workspace" | "explicit";
 
@@ -87,14 +83,13 @@ type ResourceDirectory = {
  * 第一版应用目录约定。
  *
  * agent/tools 不在这里出现：tools 包含执行语义，不能混进可序列化文本资源层。
- * prompt-template 和 skill 先被发现，但是否按需展开由后续输入/上下文模块决定。
+ * ResourceLoader 只扫描会进入上下文的 resources/ 文本资源。
+ * prompt/templates、prompt/system、skills 和 tools 都有独立语义，不在这里加载。
  */
 const RESOURCE_DIRECTORIES: readonly ResourceDirectory[] = [
   { relativePath: "resources/instructions", kind: "instruction", priority: 100 },
   { relativePath: "resources/memory", kind: "memory", priority: 200 },
-  { relativePath: "resources/references", kind: "reference", priority: 300 },
-  { relativePath: "resources/prompt-templates", kind: "prompt-template", priority: 400 },
-  { relativePath: "skills", kind: "skill", priority: 500 }
+  { relativePath: "resources/references", kind: "reference", priority: 300 }
 ];
 
 const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
@@ -111,7 +106,9 @@ const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
  *     instructions/
  *     memory/
  *     references/
- *     prompt-templates/
+ *   prompt/
+ *     templates/
+ *     system/
  *   skills/
  *   tools/
  * ```
@@ -158,7 +155,6 @@ export class ResourceLoader implements IResourceLoader {
     const snapshot = this.load();
     throwIfResourceLoadFailed(snapshot.diagnostics);
     return createAgentResourceRegistry(snapshot.resources
-      .filter(isDirectlyInjectableResource)
       .map(createAgentResourceDefinitionFromLoadedResource));
   }
 
@@ -192,7 +188,7 @@ export class ResourceLoader implements IResourceLoader {
 
     for (const entry of entries) {
       const entryPath = join(currentDir, entry.name);
-      // skills/<name>/SKILL.md 和 references 子目录都通过同一套递归规则处理。
+      // references 子目录也通过同一套递归规则处理。
       if (entry.isDirectory()) {
         resources.push(...this.walk(entryPath, directory, diagnostics));
         continue;
@@ -259,10 +255,6 @@ function throwIfResourceLoadFailed(diagnostics: readonly ResourceDiagnostic[]) {
   }
 }
 
-function isDirectlyInjectableResource(resource: LoadedTextResource): boolean {
-  return resource.kind !== "prompt-template" && resource.kind !== "skill";
-}
-
 function createAgentResourceDefinitionFromLoadedResource(
   resource: LoadedTextResource
 ): AgentResourceDefinition {
@@ -289,12 +281,6 @@ function formatLoadedResourcePromptFragment(resource: LoadedTextResource): strin
       return `<memory_context source="${sourcePath}">\n${resource.content}\n</memory_context>`;
     case "reference":
       return `<reference_context source="${sourcePath}">\n${resource.content}\n</reference_context>`;
-    case "system-prompt":
-    case "append-system-prompt":
-      return resource.content;
-    case "prompt-template":
-    case "skill":
-      throw new Error(`Loaded resource kind "${resource.kind}" is not directly injectable.`);
   }
 }
 
@@ -304,7 +290,7 @@ function sortResources(
 ): readonly LoadedTextResource[] {
   const seen = new Set<string>();
   return [...resources]
-    // priority 保证 instruction/memory/reference/template/skill 的稳定顺序；
+    // priority 保证 instruction/memory/reference 的稳定顺序；
     // label 排序让同类资源跨平台保持可预测。
     .sort((left, right) =>
       left.priority - right.priority ||

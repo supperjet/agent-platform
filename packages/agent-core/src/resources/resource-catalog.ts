@@ -63,7 +63,6 @@ export type ResourceCatalogResolution = {
  */
 export type ResourceSnapshot = ResourceCatalogResolution & {
   contextFilePaths: readonly string[];
-  skillNames: readonly string[];
   loadedResources: readonly LoadedTextResource[];
   diagnostics: readonly ResourceDiagnostic[];
 };
@@ -137,9 +136,6 @@ export class ResourceCatalog {
       ...resolution,
       contextFilePaths: resolution.entries.flatMap((entry) =>
         entry.sourceInfo.path ? [entry.sourceInfo.path] : []
-      ),
-      skillNames: resolution.entries.flatMap((entry) =>
-        entry.kind === "skill" ? [entry.name] : []
       ),
       loadedResources: [],
       diagnostics: []
