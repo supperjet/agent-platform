@@ -16,6 +16,7 @@ import type { ConversationRuntimeState } from "../conversation/conversation-stor
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { InputProcessor } from "../prompt/input-processor.js";
 import type { ProcessedInput } from "../prompt/input-processor.js";
+import type { PromptTemplateRegistry } from "../prompt/prompt-template.js";
 import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
 import type { AgentLoop, AgentLoopSnapshot } from "./agent-loop.js";
 import { ContextAssembler, type TurnContext } from "../context/context-assembler.js";
@@ -53,6 +54,8 @@ export type AgentRuntimeSessionOptions = {
   policies?: RuntimePolicies;
   /** 会话压缩摘要器；未提供时使用内置纯文本 fallback。失败会让本次 compaction 停止写入。 */
   conversationSummarizer?: ConversationSummarizer;
+  /** 可选 prompt template registry；用于在输入阶段渲染 `/template <name> key=value`。 */
+  promptTemplateRegistry?: PromptTemplateRegistry;
 };
 
 /**
@@ -185,6 +188,9 @@ export class AgentRuntimeSession extends AgentRuntime {
     // 之前短路；同一个实例也传给 TurnRunner，保证直接调用 runner 时行为一致。
     this.inputProcessor = new InputProcessor({
       ...(this.lifecycleRunner ? { lifecycleRunner: this.lifecycleRunner } : {}),
+      ...(options.promptTemplateRegistry
+        ? { promptTemplateRegistry: options.promptTemplateRegistry }
+        : {}),
     });
 
     // 创建回合运行器。这里把 RuntimeSession 的收尾钩子注入给 TurnRunner：

@@ -27,6 +27,18 @@ export type PromptTemplateDefinition = {
   loadedAt?: string;
 };
 
+export type PromptTemplateRenderInput = {
+  template: PromptTemplateDefinition;
+  variables: Record<string, string>;
+};
+
+export type RenderedPromptTemplate = {
+  name: PromptTemplateName;
+  content: string;
+  variables: Record<string, string>;
+  sourceInfo: PromptTemplateSourceInfo;
+};
+
 export type PromptTemplateDiagnostic = {
   type: "warning" | "error";
   code:
@@ -99,6 +111,34 @@ export function createPromptTemplateRegistry(
 
 export function createDefaultPromptTemplateRegistry(): PromptTemplateRegistry {
   return createPromptTemplateRegistry([]);
+}
+
+export function renderPromptTemplate(
+  input: PromptTemplateRenderInput,
+): RenderedPromptTemplate {
+  const missingVariables = new Set<string>();
+  const content = input.template.content.replace(
+    /\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/g,
+    (_match, variableName: string) => {
+      const value = input.variables[variableName];
+      if (value === undefined) {
+        missingVariables.add(variableName);
+        return "";
+      }
+      return value;
+    },
+  ).trim();
+
+  if (missingVariables.size > 0) {
+    throw new Error(`Prompt template ${input.template.name} is missing variables: ${[...missingVariables].join(", ")}`);
+  }
+
+  return {
+    name: input.template.name,
+    content,
+    variables: { ...input.variables },
+    sourceInfo: input.template.sourceInfo,
+  };
 }
 
 /**

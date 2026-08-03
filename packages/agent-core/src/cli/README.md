@@ -59,6 +59,8 @@ Loader 和 registry 的职责是分离的：
 /tools inspect_runtime 启用选定的已注册工具。
 /templates             显示发现到的 prompt templates。
 /template review       打印某个 prompt template 的内容。
+/template review target=src focus=tests
+                       渲染模板变量，并把结果作为本轮临时 message 合并进上下文。
 /policy on|off         切换默认 ToolPolicy。
 /approve ask|always|never  设置审批策略。
 /events on|off|json    切换 AgentRuntime 和 ToolRuntime 事件打印。

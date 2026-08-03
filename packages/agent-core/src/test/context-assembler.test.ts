@@ -157,6 +157,83 @@ test("ContextAssembler passes input metadata through lifecycle hooks", async () 
   assert.deepEqual(context.transientPromptMessageIndexes, [1]);
 });
 
+test("ContextAssembler merges rendered prompt template into prompt messages", async () => {
+  const assembler = new ContextAssembler();
+
+  const context = await assembler.assemble({
+    command: { type: "prompt", text: "/template review target=src/runtime.ts focus=tests" },
+    baseSystemPrompt: "base prompt",
+    conversationMessages: [],
+    metadata: {
+      slashCommand: "template",
+      inputMode: "template",
+      selectedTemplate: "review",
+      promptTemplate: {
+        name: "review",
+        content: "Review src/runtime.ts with focus tests.",
+        variables: {
+          target: "src/runtime.ts",
+          focus: "tests",
+        },
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      },
+    },
+  });
+
+  assert.deepEqual(context.promptMessages.map(readTextFromMessage), [
+    [
+      '<prompt_template name="review" source="test">',
+      "Review src/runtime.ts with focus tests.",
+      "</prompt_template>",
+    ].join("\n"),
+    "/template review target=src/runtime.ts focus=tests",
+  ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [1]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [0]);
+  assert.deepEqual(context.metadata.diagnostics.injectedSources, [
+    "input.metadata",
+    "prompt.template.message",
+  ]);
+});
+
+test("ContextAssembler preserves rendered template when beforeRun adds messages", async () => {
+  const assembler = new ContextAssembler({
+    lifecycleRunner: createLifecycleRunner({
+      beforeRun: [() => ({
+        messages: [createUserMessage("run context")],
+      })],
+    }),
+  });
+
+  const context = await assembler.assemble({
+    command: { type: "prompt", text: "/template review target=src/runtime.ts" },
+    baseSystemPrompt: "base prompt",
+    conversationMessages: [],
+    metadata: {
+      promptTemplate: {
+        name: "review",
+        content: "Review src/runtime.ts.",
+        variables: {
+          target: "src/runtime.ts",
+        },
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      },
+    },
+  });
+
+  assert.deepEqual(context.promptMessages.map(readTextFromMessage), [
+    "run context",
+    [
+      '<prompt_template name="review" source="test">',
+      "Review src/runtime.ts.",
+      "</prompt_template>",
+    ].join("\n"),
+    "/template review target=src/runtime.ts",
+  ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [2]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [0, 1]);
+});
+
 test("ContextAssembler rejects beforeContext replacing the conversation prefix", async () => {
   const previous = createUserMessage("previous");
   const assembler = new ContextAssembler({

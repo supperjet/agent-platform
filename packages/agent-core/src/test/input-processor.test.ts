@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createLifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { InputProcessor } from "../prompt/input-processor.js";
+import {
+  createPromptTemplateRegistry,
+  definePromptTemplate,
+} from "../prompt/prompt-template.js";
 
 test("InputProcessor keeps the command when onInput continues", async () => {
   const command = { type: "prompt", text: "hello" } as const;
@@ -115,6 +119,53 @@ test("InputProcessor merges onInput metadata with parsed slash metadata", async 
         selectedTemplate: "review-template",
         args: {
           raw: "src/runtime.ts",
+        },
+      },
+    },
+  );
+});
+
+test("InputProcessor renders prompt template metadata from slash input", async () => {
+  const registry = createPromptTemplateRegistry([
+    definePromptTemplate({
+      name: "review",
+      label: "Review",
+      content: "Review {{target}} with focus {{focus}}.",
+      sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      priority: 100,
+    }),
+  ]);
+  const processor = new InputProcessor({
+    promptTemplateRegistry: registry,
+  });
+
+  assert.deepEqual(
+    await processor.process({
+      command: { type: "prompt", text: "/template review target=src/runtime.ts focus=\"missing tests\"" },
+    }),
+    {
+      status: "ready",
+      command: { type: "prompt", text: "/template review target=src/runtime.ts focus=\"missing tests\"" },
+      metadata: {
+        slashCommand: "template",
+        inputMode: "template",
+        selectedTemplate: "review",
+        promptTemplate: {
+          name: "review",
+          content: "Review src/runtime.ts with focus missing tests.",
+          variables: {
+            target: "src/runtime.ts",
+            focus: "missing tests",
+          },
+          sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+        },
+        args: {
+          raw: "review target=src/runtime.ts focus=\"missing tests\"",
+          templateName: "review",
+          variables: {
+            target: "src/runtime.ts",
+            focus: "missing tests",
+          },
         },
       },
     },

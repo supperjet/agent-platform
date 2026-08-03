@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentRuntimeCommand } from "../contracts.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
+import type { RenderedPromptTemplate } from "../prompt/prompt-template.js";
 import { createUserMessage } from "../runtime/messages.js";
 import { ContextBudget, type ContextBudgetEstimate } from "./context-budget.js";
 
@@ -78,11 +79,19 @@ export class ContextAssembler {
 
   async assemble(input: ContextAssemblerInput): Promise<TurnContext> {
     const userMessage = createUserMessage(input.command.text);
+    const templateMessage = createTemplateMessage(input.metadata);
+    const initialPromptMessages: AgentMessage[] = [
+      ...(templateMessage ? [templateMessage] : []),
+      userMessage,
+    ];
     let systemPrompt = input.baseSystemPrompt;
-    let promptMessages: AgentMessage[] = [userMessage];
+    let promptMessages: AgentMessage[] = initialPromptMessages;
     let persistentPromptMessages: AgentMessage[] = [userMessage];
     let hookMetadata: Record<string, unknown> | undefined = input.metadata;
-    const injectedSources: string[] = input.metadata ? ["input.metadata"] : [];
+    const injectedSources: string[] = [
+      ...(input.metadata ? ["input.metadata"] : []),
+      ...(templateMessage ? ["prompt.template.message"] : []),
+    ];
 
     const beforeRunResult = await this.options.lifecycleRunner?.beforeRun({
       command: input.command,
@@ -94,7 +103,7 @@ export class ContextAssembler {
       injectedSources.push("lifecycle.beforeRun.systemPrompt");
     }
     if (beforeRunResult?.messages?.length) {
-      promptMessages = [...beforeRunResult.messages, userMessage];
+      promptMessages = [...beforeRunResult.messages, ...initialPromptMessages];
       injectedSources.push("lifecycle.beforeRun.messages");
     }
     if (beforeRunResult?.metadata) {
@@ -215,4 +224,35 @@ function mergeMetadata(
     ...currentMetadata,
     ...nextMetadata,
   };
+}
+
+function createTemplateMessage(
+  metadata: Record<string, unknown> | undefined,
+): AgentMessage | undefined {
+  const renderedTemplate = readRenderedTemplate(metadata);
+  if (!renderedTemplate) return undefined;
+  return createUserMessage([
+    `<prompt_template name="${escapeXmlAttribute(renderedTemplate.name)}" source="${escapeXmlAttribute(renderedTemplate.sourceInfo.label)}">`,
+    renderedTemplate.content,
+    "</prompt_template>",
+  ].join("\n"));
+}
+
+function readRenderedTemplate(
+  metadata: Record<string, unknown> | undefined,
+): RenderedPromptTemplate | undefined {
+  const value = metadata?.promptTemplate;
+  if (!value || typeof value !== "object") return undefined;
+  const template = value as Partial<RenderedPromptTemplate>;
+  if (typeof template.name !== "string" || typeof template.content !== "string") return undefined;
+  if (!template.sourceInfo || typeof template.sourceInfo.label !== "string") return undefined;
+  return template as RenderedPromptTemplate;
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }

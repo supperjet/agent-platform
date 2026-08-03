@@ -200,38 +200,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       continue;
     }
 
-    const run = await startPlaygroundRun(state, "prompt");
-    await markRuntimeCommandAccepted(state, run.runId, run.commandId, { type: "prompt", text: line });
-    let outcome: AgentExecutionOutcome;
-    try {
-      outcome = await state.runtime.execute({ type: "prompt", text: line });
-    } catch (error) {
-      outcome = {
-        status: "failed",
-        errorCode: "PLAYGROUND_RUN_FAILED",
-        message: readErrorMessage(error),
-      };
-    }
-    await finishPlaygroundRun(state, run.runId, outcome);
-    if (outcome.status === "failed" || outcome.status === "commit_failed") {
-      await markRuntimeCommandFinished(state, outcome);
-      stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
-    } else if (outcome.status === "aborted") {
-      const commitOutcome = await commitPlaygroundConversationState(state);
-      await markRuntimeCommandFinished(state, commitOutcome);
-      if (commitOutcome.status === "commit_failed") {
-        stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
-      } else {
-        stderr.write("Run aborted.\n");
-      }
-    } else {
-      const commitOutcome = await commitPlaygroundConversationState(state);
-      await markRuntimeCommandFinished(state, commitOutcome);
-      if (commitOutcome.status === "commit_failed") {
-        stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
-      }
-    }
-    stdout.write("\n");
+    await executePromptLine(state, line);
   }
 
   rl.close();
@@ -266,6 +235,9 @@ function createRuntimeState(
     definition,
     resourceRegistry: options.resourceRegistry,
     toolRegistry: options.toolRegistry,
+    ...(options.promptTemplateRegistry
+      ? { promptTemplateRegistry: options.promptTemplateRegistry }
+      : {}),
     toolRuntime,
     lifecycleHooks,
     policies: {
@@ -454,6 +426,10 @@ async function handleCommand(
     return true;
   }
   if (command === "template") {
+    if (isTemplateInvocation(value)) {
+      await executePromptLine(state, line);
+      return true;
+    }
     printPromptTemplate(state.promptTemplateRegistry, value);
     return true;
   }
@@ -564,6 +540,41 @@ function createSystemPromptPreview(
     resolveApiKey: options.resolveApiKey,
   });
   return assembly.systemPrompt;
+}
+
+async function executePromptLine(state: PlaygroundState, line: string) {
+  const run = await startPlaygroundRun(state, "prompt");
+  await markRuntimeCommandAccepted(state, run.runId, run.commandId, { type: "prompt", text: line });
+  let outcome: AgentExecutionOutcome;
+  try {
+    outcome = await state.runtime.execute({ type: "prompt", text: line });
+  } catch (error) {
+    outcome = {
+      status: "failed",
+      errorCode: "PLAYGROUND_RUN_FAILED",
+      message: readErrorMessage(error),
+    };
+  }
+  await finishPlaygroundRun(state, run.runId, outcome);
+  if (outcome.status === "failed" || outcome.status === "commit_failed") {
+    await markRuntimeCommandFinished(state, outcome);
+    stderr.write(`${outcome.errorCode}: ${outcome.message}\n`);
+  } else if (outcome.status === "aborted") {
+    const commitOutcome = await commitPlaygroundConversationState(state);
+    await markRuntimeCommandFinished(state, commitOutcome);
+    if (commitOutcome.status === "commit_failed") {
+      stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
+    } else {
+      stderr.write("Run aborted.\n");
+    }
+  } else {
+    const commitOutcome = await commitPlaygroundConversationState(state);
+    await markRuntimeCommandFinished(state, commitOutcome);
+    if (commitOutcome.status === "commit_failed") {
+      stderr.write(`${commitOutcome.errorCode}: ${commitOutcome.message}\n`);
+    }
+  }
+  stdout.write("\n");
 }
 
 async function startPlaygroundRun(
@@ -937,6 +948,10 @@ function parseNameList(value: string, allNames: readonly string[]) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function isTemplateInvocation(value: string) {
+  return /\s[A-Za-z_][A-Za-z0-9_-]*=/.test(` ${value}`);
+}
+
 function parseOnOff(value: string, label: string) {
   if (value === "on") return true;
   if (value === "off") return false;
@@ -1057,6 +1072,8 @@ function printHelp() {
   /tools inspect_runtime Enable selected registered tools.
   /templates             Show discovered prompt templates.
   /template review       Print one prompt template.
+  /template review target=src focus=tests
+                         Render a template and send it as transient context.
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.

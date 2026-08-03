@@ -7,6 +7,7 @@ import {
   PromptTemplateLoader,
   createPromptTemplateRegistry,
   definePromptTemplate,
+  renderPromptTemplate,
 } from "../prompt/prompt-template.js";
 
 test("PromptTemplateLoader discovers templates by agent prompt directory convention", () => {
@@ -94,6 +95,47 @@ test("PromptTemplateRegistry validates duplicate names and missing lookups", () 
 
   const registry = createPromptTemplateRegistry([]);
   assert.throws(() => registry.resolve(["review"]), /does not contain template: review/);
+});
+
+test("renderPromptTemplate injects variables into template content", () => {
+  const rendered = renderPromptTemplate({
+    template: definePromptTemplate({
+      name: "review",
+      label: "Review",
+      content: "Review {{target}} with focus {{focus}}.",
+      sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      priority: 100,
+    }),
+    variables: {
+      target: "src/runtime.ts",
+      focus: "regressions",
+    },
+  });
+
+  assert.deepEqual(rendered, {
+    name: "review",
+    content: "Review src/runtime.ts with focus regressions.",
+    variables: {
+      target: "src/runtime.ts",
+      focus: "regressions",
+    },
+    sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+  });
+});
+
+test("renderPromptTemplate rejects missing variables", () => {
+  assert.throws(() => renderPromptTemplate({
+    template: definePromptTemplate({
+      name: "review",
+      label: "Review",
+      content: "Review {{target}} with focus {{focus}}.",
+      sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      priority: 100,
+    }),
+    variables: {
+      target: "src/runtime.ts",
+    },
+  }), /missing variables: focus/);
 });
 
 function createTempAgentDir() {

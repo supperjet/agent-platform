@@ -1706,17 +1706,25 @@ prompt/prompt-template.ts
 - 实现 prompt template registry / discovery v1。已完成第一版：
   `PromptTemplateLoader({ agentDir }).createRegistry()` 扫描 `agent/prompt/templates/`
   并生成只读 registry；CLI 支持 `/templates` 和 `/template <name>` 查看。
-- 实现 prompt template expansion v1。
+- 实现 prompt template expansion v1。已完成第一版：`/template <name> key=value`
+  会用 `{{key}}` 占位渲染模板，并通过 `InputProcessor` 写入
+  `metadata.promptTemplate`。
 - 实现 skill descriptor / selection v1。
 - 扩展 `ProcessedInput` 的 metadata，让 template / skill 有稳定字段。
+  template metadata 已包含 `selectedTemplate`、`inputMode` 和
+  `promptTemplate`。
 - `ContextAssembler` 消费 template / skill metadata 并注入对应上下文。
-- 在 CLI playground 中增加 `/template`、`/skill` 或示例 hook。
+  template v1 已作为本轮 transient user message 合并进 messages，不污染 base
+  system prompt，也不写入长期 conversation state。
+- 在 CLI playground 中增加 `/template`、`/skill` 或示例 hook。template v1 已接入：
+  `/template <name>` 查看模板，`/template <name> key=value` 执行模板输入。
 
 验收：
 
 - `/review xxx` 这类输入可以被解析并转成 metadata。
 - metadata 可被 `beforeRun` 或 `beforeContext` 消费。
 - template/skill 展开不污染 base system prompt。
+- `/context` 能看到 prompt template 渲染后的 transient message。
 
 ### 阶段 J：业务能力定义 / Capability Pack
 

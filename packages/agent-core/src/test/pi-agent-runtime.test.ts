@@ -11,7 +11,9 @@ import {
 import {
   createAgentToolRegistry,
   createCompositeCompactionPolicy,
+  createPromptTemplateRegistry,
   defineAgentTool,
+  definePromptTemplate,
   formatAgentDefinition,
   requireToolApproval,
   PiAgentRuntimeFactory,
@@ -167,6 +169,62 @@ test("runtime context diagnostics use the assembled model context window", async
       reservedOutputTokens: 100,
       safetyMarginTokens: 1024,
     });
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("runtime session renders prompt templates into transient context messages", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-template-runtime-test" });
+  registration.setResponses([
+    fauxAssistantMessage(fauxText("Template response."))
+  ]);
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "template-runtime-agent",
+      model: registration.getModel(),
+      instructions: ["Answer concisely in Chinese."],
+      toolNames: []
+    }),
+    promptTemplateRegistry: createPromptTemplateRegistry([
+      definePromptTemplate({
+        name: "review",
+        label: "Review",
+        content: "Review {{target}} with focus {{focus}}.",
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+        priority: 100,
+      }),
+    ]),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-template-runtime");
+
+  try {
+    const outcome = await runtime.execute({
+      type: "prompt",
+      text: "/template review target=src/runtime.ts focus=tests",
+    });
+
+    assert.deepEqual(outcome, { status: "succeeded" });
+    assert.deepEqual(runtime.inspectContext()?.messages.map((message) => ({
+      scope: message.scope,
+      role: message.role,
+      text: message.text,
+    })), [
+      {
+        scope: "transient",
+        role: "user",
+        text: [
+          '<prompt_template name="review" source="test">',
+          "Review src/runtime.ts with focus tests.",
+          "</prompt_template>",
+        ].join("\n"),
+      },
+      {
+        scope: "persistent",
+        role: "user",
+        text: "/template review target=src/runtime.ts focus=tests",
+      },
+    ]);
   } finally {
     registration.unregister();
   }
