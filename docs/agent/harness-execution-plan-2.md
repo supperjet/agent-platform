@@ -227,6 +227,11 @@ agent/
       extra.md
   resources/
   skills/
+    review/
+      SKILL.md
+      references/
+      scripts/
+      templates/
   tools/
 ```
 
@@ -242,8 +247,8 @@ agent/
   渲染成 user prompt 的任务模板。不进入 ResourceLoader。
 - `agent/prompt/system/`：未来 prompt 装配配置入口，可用于 base / extra system
   prompt。暂不实现，不进入 ResourceLoader。
-- `agent/skills/`：放 `SKILL.md` 风格的流程型能力说明。发现、选择、展开和
-  按需注入由后续 Skill 模块处理，不进入 ResourceLoader。
+- `agent/skills/`：放 `SKILL.md` 风格的目录能力包。发现、选择、展开和
+  按需注入由 Skill 模块处理，不进入 ResourceLoader。
 - `agent/tools/`：放可执行工具定义。它们进入 `ToolRegistry` / `ToolCatalog` /
   `ToolRuntime`，不进入 ResourceLoader / ResourceCatalog。
 
@@ -263,29 +268,34 @@ agent/resources/
 核心约束：`agent/resources/` 中的所有内容必须能被 JSON 序列化后展示、审计
 和测试；只有 `agent/tools/` 允许出现执行函数或运行时闭包。
 
+已实现：
+
+- `agent/resources/instructions/` / `memory/` / `references/` 的基础目录发现。
+- `MEMORY.md` 可以作为 `kind: "memory"` 的文件资源进入上下文。
+- resource diagnostics / source metadata / ordering 的第一版。
+- prompt templates discovery 和 `/template` 显式渲染入口。
+
 未实现：
 
-- 自动扫描 `AGENTS.md` / `CLAUDE.md`。
-- 自动扫描 `MEMORY.md`，作为第一版 file-backed memory。
+- global / cwd-nearest scoped `AGENTS.md` / `CLAUDE.md` / `MEMORY.md` 自动发现。
 - context files discovery。
 - skills discovery。
-- prompt templates discovery。
 - resource reload。
 - `extendResources()`。
 - trust/source scope。
-- resource diagnostics / source metadata / ordering。
 
 ### 3.4 Skill / Prompt Template
 
-未实现：
+Prompt Template 当前已经有第一版：
 
 - `prompt-template.ts`
-- 正式 slash command 输入协议
-- skill registry
-- skill selector
-- skill expansion
-- active skill context injection
-- prompt template expansion
+- `PromptTemplateLoader({ agentDir }).createRegistry()`
+- `/templates` 和 `/template <name>`
+- `/template <name> key=value` 渲染为本轮 transient user message
+
+Skill 当前仍未实现。第一版设计应参考 Claude Code / Agent Skills 的成熟
+结构：目录即能力包，入口文件是 `SKILL.md`，启动时只发现轻量 metadata，
+真正激活时才加载完整正文和必要支持文件。
 
 已具备的基础：
 
@@ -296,10 +306,48 @@ agent/resources/
 - 这类临时注入默认是 `transient` scope，可通过 `/context` 调试，不污染
   conversation state。
 
-因此当前不建议马上实现完整 skill registry 或 prompt template renderer。
-现阶段应把 slash command 视为 metadata 入口，等 Queue / Turn Execution
-语义稳定后，再把 template、skill selection、skill context injection
-正式抽象出来。
+Skill V1 目标不是自动化选择器，而是把能力包的发现、审计和显式激活入口
+固化下来。
+
+Skill V1 推荐目录：
+
+```text
+agent/skills/
+  review/
+    SKILL.md
+    references/
+      checklist.md
+    templates/
+      finding.md
+    scripts/
+      collect-diff.ts
+```
+
+`SKILL.md` 推荐使用轻量 frontmatter：
+
+```md
+---
+name: review
+description: Review code changes and report findings first.
+disable_model_invocation: true
+---
+
+## Instructions
+
+Report findings first, ordered by severity.
+```
+
+Skill V1 边界：
+
+- `SkillLoader` 发现 `agent/skills/**/SKILL.md`，解析 `name`、`description`、
+  `disable_model_invocation`、source path 和支持文件清单。
+- `SkillRegistry` 提供只读查询和去重校验。
+- loader / registry 的产物必须可序列化、可审计，不包含运行时闭包。
+- `references/`、`templates/`、`scripts/` 作为 skill 包支持文件先只做清单和
+  显式读取；V1 不自动执行脚本。
+- CLI 先提供 `/skills` 和 `/skill <name>` 查看能力包详情。
+- 自动 skill selection、active skill context injection、脚本执行权限和信任
+  策略延后。
 
 ### 3.5 Model 层
 
@@ -1502,8 +1550,8 @@ Resource 层只处理可序列化、可审计、无执行闭包的文本资源�
 
 Resource 层职责边界：
 
-- 发现文本资源：`AGENTS.md` / `CLAUDE.md` / `MEMORY.md` / `SKILL.md` /
-  prompt templates / explicit reference resources。
+- 发现文本资源：`AGENTS.md` / `CLAUDE.md` / `MEMORY.md` / explicit reference
+  resources。
 - 读取文本资源，保留 path、kind、scope、source、priority、loadedAt 等
   metadata。
 - 分类文本资源，并严格遵守 3.3 中 `LoadedResourceKind` 的语义：
@@ -1544,6 +1592,9 @@ agent/
   skills/
     <skill-name>/
       SKILL.md
+      references/
+      templates/
+      scripts/
   tools/
     *.ts
 ```
@@ -1560,8 +1611,8 @@ agent/
   PromptTemplateLoader / InputProcessor / workflow 渲染为 user prompt。
 - `agent/prompt/system/` 是可选预留目录，未来由 PromptLoader / PromptAssembler
   处理 base / extra system prompt，不进入 ResourceLoader。
-- `agent/skills/` 放 `SKILL.md` 风格能力说明。Skill 发现、选择、展开和激活
-  上下文由后续 Skill 模块负责，不进入 ResourceLoader。
+- `agent/skills/` 放 `SKILL.md` 风格目录能力包。Skill 发现、选择、展开和
+  激活上下文由 Skill 模块负责，不进入 ResourceLoader。
 - `agent/tools/` 放可执行工具定义，只进入 ToolRegistry / ToolCatalog /
   ToolRuntime，不进入 ResourceLoader / ResourceCatalog。
 
@@ -1571,6 +1622,8 @@ agent/
   结构发现文本资源并生成 ResourceRegistry。
 - 应用入口只指定目录：`ToolsLoader({ agentDir }).createRegistry()` 从
   `agent/tools/index` 发现工具定义并生成 ToolRegistry。
+- 应用入口后续只指定目录：`SkillLoader({ agentDir }).createRegistry()` 从
+  `agent/skills/**/SKILL.md` 发现能力包 metadata 并生成 SkillRegistry。
 - `createAgentResourceRegistry(...)` / `createAgentToolRegistry(...)` 作为低层
   构造函数保留给 loader 内部、测试和高级 SDK 场景；普通 agent 应用不显式调用。
 - ToolLoader 不能复用 ResourceLoader；ResourceLoader 的产物必须保持可序列化、
@@ -1599,7 +1652,7 @@ LoadedResource schema
 - 定义 `LoadedTextResource` / `LoadedResourceKind` / `ResourceDiagnostics`。
 - 实现 ResourceLoader v1，先支持 workspace 文件发现和读取。
 - 扫描 `AGENTS.md` / `CLAUDE.md`，归类为 `instruction`。
-- 预留 `MEMORY.md`，归类为 `memory`，具体 memory 语义在阶段 G 收口。
+- 预留 `MEMORY.md`，归类为 `memory`，具体 memory 语义在阶段 H 收口。
 - ResourceCatalog v2 接收 ResourceLoader 输出，完成校验、去重、排序和解析。
 - PromptAssembler / ContextAssembler 消费 resource snapshot，而不是直接读文件。
 - 支持 resource reload。
@@ -1614,7 +1667,73 @@ LoadedResource schema
 - diagnostics 结构化返回，不直接打印或退出进程。
 - ContextAssembler / PromptAssembler 不再直接负责文件发现。
 
-### 阶段 G：File-backed Memory v1
+### 阶段 G：SkillLoader / SkillRegistry v1
+
+目标：参考 Claude Code / Agent Skills 的成熟设计，把 `agent/skills/` 固化为
+目录能力包。第一版只做发现、解析、审计和显式查看，不做自动选择、不自动注入、
+不执行脚本。
+
+Skill V1 职责边界：
+
+- skill 表达“遇到某类任务时应该怎么工作”，不是静态背景知识，也不是工具。
+- `SKILL.md` 是能力包入口，支持轻量 frontmatter 和正文 instructions。
+- `references/`、`templates/`、`scripts/` 是能力包的支持文件；V1 先记录清单和
+  来源，只有显式查看时才读取内容。
+- SkillLoader / SkillRegistry 的产物必须可序列化、可审计，不包含执行闭包。
+- skill 不进入 ResourceLoader / ResourceCatalog，也不进入 base system prompt。
+- skill activation 是后续阶段；V1 只保留显式入口和 metadata。
+
+推荐目录：
+
+```text
+agent/skills/
+  review/
+    SKILL.md
+    references/
+      checklist.md
+    templates/
+      finding.md
+    scripts/
+      collect-diff.ts
+```
+
+`SKILL.md` frontmatter v1：
+
+```md
+---
+name: review
+description: Review code changes and report findings first.
+disable_model_invocation: true
+---
+```
+
+字段含义：
+
+- `name`：稳定 skill 名称。缺省时可由目录名推断，但文件声明优先。
+- `description`：用于 `/skills` 展示和未来模型选择提示。它应该说明何时使用
+  这个 skill，而不只是复述名称。
+- `disable_model_invocation`：借鉴 Claude Code 的显式控制字段。V1 只记录和
+  展示，不接自动选择器。
+
+工作项：
+
+- 定义 `LoadedSkill` / `SkillSupportFile` / `SkillDiagnostic`。
+- 实现 `SkillLoader({ agentDir }).createRegistry()`，扫描
+  `agent/skills/**/SKILL.md`。
+- 实现 `SkillRegistry` 的注册、查询、去重和 diagnostics。
+- CLI playground 增加 `/skills` 和 `/skill <name>` 只读查看。
+- 文档说明 skill、resource、prompt template、tool 的边界。
+- 暂缓自动 skill selection、context injection、script execution、trust policy。
+
+验收：
+
+- `agent/skills/review/SKILL.md` 可以被发现并展示 metadata。
+- 重复 skill name、非法 frontmatter、不可读文件会进入 diagnostics。
+- `/skills` 能看到 name / description / source。
+- `/skill <name>` 能看到完整 `SKILL.md` 和支持文件清单。
+- SkillLoader 不进入 ResourceLoader，且不产生执行闭包。
+
+### 阶段 H：File-backed Memory v1
 
 目标：把 `MEMORY.md` 作为第一版长期记忆，复用阶段 F 的 ResourceLoader /
 ResourceCatalog 边界，先做只读、文件化、可审计的 memory context。
@@ -1645,7 +1764,7 @@ Memory v1 职责边界：
 - memory 与 `AGENTS.md`、conversation、compaction summary 的区别在文档和测试
   中明确。
 
-### 阶段 H：Policies
+### 阶段 I：Policies
 
 目标：把权限、预算、重试、压缩、工具安全等治理能力从主流程中抽离出来。
 
@@ -1672,10 +1791,11 @@ Tool / Model policy 收口
 - retry 和 compaction 不破坏 conversation state。
 - policy 决策可追踪、可测试。
 
-### 阶段 I：Prompt Template / Skill 输入入口
+### 阶段 J：Prompt Template / Skill 激活入口
 
 目标：在 InputProcessor v2 的基础 parser 之上，把 prompt template 和 skill
-变成正式 core 扩展能力。
+变成正式 core 扩展能力。Prompt template 已完成发现和显式渲染第一版；本阶段
+后续重点是 skill activation、自动选择和上下文注入。
 
 启动条件：
 
@@ -1710,7 +1830,8 @@ prompt/prompt-template.ts
 - 实现 prompt template expansion v1。已完成第一版：`/template <name> key=value`
   会用 `{{key}}` 占位渲染模板，并通过 `InputProcessor` 写入
   `metadata.promptTemplate`；声明变量会参与缺失变量校验。
-- 实现 skill descriptor / selection v1。
+- 在阶段 G 的 SkillLoader / SkillRegistry 基础上实现 skill selection /
+  activation v1。
 - 扩展 `ProcessedInput` 的 metadata，让 template / skill 有稳定字段。
   template metadata 已包含 `selectedTemplate`、`inputMode` 和
   `promptTemplate`。
@@ -1728,7 +1849,7 @@ prompt/prompt-template.ts
 - `/context` 能看到 prompt template 渲染后的 transient message。
 - `/templates` 能看到模板描述和变量名，`/template <name>` 能看到变量说明。
 
-### 阶段 J：业务能力定义 / Capability Pack
+### 阶段 K：业务能力定义 / Capability Pack
 
 目标：在 core 核心能力稳定后，再抽象业务能力的装配模型。
 
@@ -1746,7 +1867,7 @@ prompt/prompt-template.ts
 - 多个 pack 的工具、资源、hook、policy 可以组合。
 - core 不内置具体业务场景逻辑。
 
-### 阶段 K：Public API 与命名收口
+### 阶段 L：Public API 与命名收口
 
 目标：从开发期内部导出收束到稳定 SDK surface。
 
@@ -1779,9 +1900,10 @@ Runtime/Lifecycle v1 小收尾
   -> 持久化与恢复
   -> ContextBudget / Compaction
   -> ResourceLoader / ResourceCatalog v2
+  -> SkillLoader / SkillRegistry v1
   -> File-backed Memory v1
   -> Policies
-  -> Prompt Template / Skill
+  -> Prompt Template / Skill 激活入口
   -> Capability Pack
   -> Public API 收口
 ```
@@ -1789,8 +1911,9 @@ Runtime/Lifecycle v1 小收尾
 这个顺序的判断是：
 
 - 先完成可运行和可靠运行能力。
-- 再补长期上下文能力，包括 compaction、资源发现和 file-backed memory。
-- 然后再补策略治理、template/skill 等更高层能力。
+- 再补长期上下文和目录能力，包括 compaction、资源发现、SkillLoader 和
+  file-backed memory。
+- 然后再补策略治理、template/skill 激活等更高层能力。
 - 最后才抽象业务能力定义，避免把未稳定的 core 过早包装起来。
 
 做完这些后，`agent-core` 可以认为已经完成通用 Agent Runtime 的核心能力。
