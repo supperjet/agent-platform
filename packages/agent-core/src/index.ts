@@ -16,6 +16,7 @@ export * from "./lifecycle/lifecycle-runner.js";
 export * from "./model/deepseek-model.js";
 export * from "./policies/runtime-policies.js";
 export * from "./prompt/input-processor.js";
+export * from "./prompt/prompt-template.js";
 export * from "./resources/resource-catalog.js";
 export * from "./resources/resource-loader.js";
 export * from "./tools/built-in/index.js";

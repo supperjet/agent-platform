@@ -78,8 +78,9 @@ agent/
   model、启用资源、启用 skills、启用 tools、policies、lifecycle hooks 和
   runtime options。
 - `agent/resources/` 只放可序列化文本资源。
-- `agent/prompt/templates/` 放按需激活的任务模板，后续由 PromptTemplate 模块
-  渲染为 user prompt 或 run-level instruction，不进入 ResourceLoader。
+- `agent/prompt/templates/` 放按需激活的任务模板，由 `PromptTemplateLoader`
+  发现并注册；后续可由 slash command、workflow 或宿主 UI 渲染为 user prompt
+  或 run-level instruction，不进入 ResourceLoader。
 - `agent/prompt/system/` 是未来 prompt 装配配置入口，暂不实现，也不进入
   ResourceLoader。
 - `agent/skills/` 放 `SKILL.md` 风格能力说明，后续由 Skill 模块发现、选择和
@@ -106,7 +107,8 @@ agent/
 | `resources/references/` | `reference` | 是 |
 
 `prompt/templates/`、`prompt/system/` 和 `skills/` 都不属于 ResourceLoader。
-后续选择、展开和按需注入应由 Prompt / Skill 模块处理。
+其中 `prompt/templates/` 已由独立的 PromptTemplate 模块处理；选择、展开和按需
+注入仍由后续 InputProcessor / workflow / Skill 模块接入。
 
 ## Prompt 边界
 
@@ -193,5 +195,6 @@ Resource 层不会直接打印错误或退出进程。读取失败、重复资�
 - 支持 global / workspace / project / explicit 多 scope。
 - 支持 frontmatter 覆盖 `kind`、`priority`、`label`、`scope`。
 - 支持 resource reload。
-- 支持 PromptTemplateLoader 和 SkillLoader，但这些能力应在对应模块中实现，而
-  不是放进 ResourceLoader。
+- 扩展 PromptTemplate 展开流程，把模板按需渲染成 user prompt 或 run-level
+  instruction。
+- 支持 SkillLoader，但这些能力应在对应模块中实现，而不是放进 ResourceLoader。

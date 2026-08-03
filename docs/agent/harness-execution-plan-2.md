@@ -1682,8 +1682,8 @@ Tool / Model policy 收口
 - 阶段 C 的 turn queue 和 abort/steer/follow-up 语义已经稳定。
 - 阶段 D 的持久化边界已经明确，至少知道 template/skill 运行痕迹是否进入
   run/event store。
-- ResourceCatalog v2 至少定义了 template/skill 文件发现与 trust/source
-  scope 的职责边界。
+- ResourceCatalog v2 已经把 template/skill 排除在资源层之外；PromptTemplate
+  已拥有独立 loader / registry，skill 的 trust/source scope 仍需后续定义。
 
 在这些条件满足前，只保留阶段 B 已实现的薄入口：slash command metadata
 加 lifecycle hook 消费。
@@ -1692,7 +1692,8 @@ Tool / Model policy 收口
 
 ```text
 prompt/prompt-template.ts
-  -> template registry / expansion
+  -> template registry / discovery
+  -> template expansion
   -> skill descriptor / selection
   -> InputProcessor 输出 template / skill metadata
   -> ContextAssembler 注入 template / skill context
@@ -1702,7 +1703,10 @@ prompt/prompt-template.ts
 工作项：
 
 - 复用阶段 B 的 slash command 基础解析。
-- 实现 prompt template registry / expansion v1。
+- 实现 prompt template registry / discovery v1。已完成第一版：
+  `PromptTemplateLoader({ agentDir }).createRegistry()` 扫描 `agent/prompt/templates/`
+  并生成只读 registry；CLI 支持 `/templates` 和 `/template <name>` 查看。
+- 实现 prompt template expansion v1。
 - 实现 skill descriptor / selection v1。
 - 扩展 `ProcessedInput` 的 metadata，让 template / skill 有稳定字段。
 - `ContextAssembler` 消费 template / skill metadata 并注入对应上下文。

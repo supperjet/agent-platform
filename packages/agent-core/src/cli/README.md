@@ -35,7 +35,7 @@ src/cli/agent/
   tools/
 ```
 
-`agent/index.ts` 是应用入口点。它加载默认的 DeepSeek 模型，为 agent 目录创建 `ResourceLoader` 和 `ToolsLoader`，并把生成的 registry 传入 `startAgentPlayground`。
+`agent/index.ts` 是应用入口点。它加载默认的 DeepSeek 模型，为 agent 目录创建 `ResourceLoader`、`PromptTemplateLoader` 和 `ToolsLoader`，并把生成的 registry 传入 `startAgentPlayground`。
 
 `agent/main.ts` 拥有 playground 的运行时循环。它的 `AgentPlaygroundOptions` 接收已经组装好的运行时依赖和可选的 `conversationFile`；它不发现资源、不加载模型、也不注册工具。
 
@@ -44,6 +44,7 @@ src/cli/agent/
 Loader 和 registry 的职责是分离的：
 
 - `ResourceLoader({ agentDir }).createRegistry()` 发现文本资源并创建资源 registry。
+- `PromptTemplateLoader({ agentDir }).createRegistry()` 发现 `prompt/templates/` 下的任务模板并创建模板 registry。
 - `ToolsLoader({ agentDir }).createRegistry()` 注册核心内置工具、导入 `tools/index.js`，并创建工具 registry。
 - `startAgentPlayground` 只接收 registries，不暴露 loader 参数。
 
@@ -56,6 +57,8 @@ Loader 和 registry 的职责是分离的：
 /tools all             启用应用入口注册的所有工具。
 /tools none            禁用所有工具。
 /tools inspect_runtime 启用选定的已注册工具。
+/templates             显示发现到的 prompt templates。
+/template review       打印某个 prompt template 的内容。
 /policy on|off         切换默认 ToolPolicy。
 /approve ask|always|never  设置审批策略。
 /events on|off|json    切换 AgentRuntime 和 ToolRuntime 事件打印。

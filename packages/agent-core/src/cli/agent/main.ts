@@ -23,6 +23,10 @@ import {
   type AgentRuntimeStateSnapshot,
   type LifecycleHooks,
 } from "../../index.js";
+import {
+  createDefaultPromptTemplateRegistry,
+  type PromptTemplateRegistry,
+} from "../../prompt/prompt-template.js";
 import type { AgentResourceRegistry } from "../../resources/resource-catalog.js";
 import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
@@ -40,6 +44,8 @@ type CompactionSummarizerMode = "fallback" | "llm";
 const PLAYGROUND_COMMANDS = new Set([
   "help",
   "tools",
+  "templates",
+  "template",
   "policy",
   "approve",
   "events",
@@ -67,6 +73,7 @@ export type AgentPlaygroundOptions = {
   resolveApiKey: (provider: string) => string | undefined | Promise<string | undefined>;
   resourceRegistry: AgentResourceRegistry;
   toolRegistry: AgentToolRegistry;
+  promptTemplateRegistry?: PromptTemplateRegistry;
   workingDirectory?: string;
   conversationFile?: string;
 };
@@ -76,6 +83,7 @@ type PlaygroundState = {
   availableToolNames: string[];
   toolNames: string[];
   resourceNames: string[];
+  promptTemplateRegistry: PromptTemplateRegistry;
   policyEnabled: boolean;
   compactionEnabled: boolean;
   compactionProtectLastMessages: number;
@@ -137,6 +145,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   const runRecorder: PlaygroundRunRecorder = {};
   const runtimeRecorder: PlaygroundRuntimeRecorder = {};
   const restoredFile = await localStore.load();
+  const promptTemplateRegistry = options.promptTemplateRegistry ?? createDefaultPromptTemplateRegistry();
 
   const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
     const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
@@ -145,6 +154,7 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       availableToolNames: state?.availableToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
       toolNames: state?.toolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
       resourceNames: state?.resourceNames ?? options.resourceRegistry.getAllDefinitions().map((resource) => resource.name),
+      promptTemplateRegistry,
       policyEnabled: state?.policyEnabled ?? true,
       compactionEnabled: state?.compactionEnabled ?? false,
       compactionProtectLastMessages: state?.compactionProtectLastMessages ?? 6,
@@ -439,6 +449,14 @@ async function handleCommand(
     stdout.write(`tools: ${state.toolNames.join(", ") || "(none)"}\n`);
     return true;
   }
+  if (command === "templates") {
+    printPromptTemplates(state.promptTemplateRegistry);
+    return true;
+  }
+  if (command === "template") {
+    printPromptTemplate(state.promptTemplateRegistry, value);
+    return true;
+  }
   if (command === "policy") {
     state.policyEnabled = parseOnOff(value, "policy");
     rebuildRuntime(true);
@@ -722,6 +740,34 @@ async function printStoredRuns(state: PlaygroundState) {
   stdout.write(`${JSON.stringify(runs, null, 2)}\n`);
 }
 
+function printPromptTemplates(registry: PromptTemplateRegistry) {
+  const templates = registry.getAllDefinitions();
+  if (templates.length === 0) {
+    stdout.write("templates: (none)\n");
+    return;
+  }
+  stdout.write(`templates: ${templates.map((template) => template.name).join(", ")}\n`);
+}
+
+function printPromptTemplate(registry: PromptTemplateRegistry, name: string) {
+  if (!name) {
+    stdout.write('/template expects a template name, for example "/template review".\n');
+    return;
+  }
+  const template = registry.getDefinition(name);
+  if (!template) {
+    stdout.write(`template not found: ${name}\n`);
+    return;
+  }
+  stdout.write([
+    `template: ${template.name}`,
+    `source: ${template.sourceInfo.label}`,
+    "",
+    template.content,
+    "",
+  ].join("\n"));
+}
+
 async function printStoredEvents(state: PlaygroundState, runId: string) {
   const events = runId
     ? await state.eventStore.listByRun(runId)
@@ -997,6 +1043,7 @@ function printIntro(state: PlaygroundState | undefined) {
   if (state) {
     stdout.write(`cwd: ${state.workingDirectory}\n`);
     stdout.write(`tools: ${state.toolNames.join(", ")}\n`);
+    stdout.write(`templates: ${state.promptTemplateRegistry.getAllDefinitions().map((template) => template.name).join(", ") || "(none)"}\n`);
     stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}, lifecycle: ${state.lifecycleMode}\n`);
     stdout.write(formatCompactStatus(state));
   }
@@ -1008,6 +1055,8 @@ function printHelp() {
   /tools all             Enable all registered tools.
   /tools none            Disable all tools.
   /tools inspect_runtime Enable selected registered tools.
+  /templates             Show discovered prompt templates.
+  /template review       Print one prompt template.
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.

@@ -1,0 +1,107 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import {
+  PromptTemplateLoader,
+  createPromptTemplateRegistry,
+  definePromptTemplate,
+} from "../prompt/prompt-template.js";
+
+test("PromptTemplateLoader discovers templates by agent prompt directory convention", () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeFile(agentDir, "prompt/templates/review.md", "Review this change.");
+    writeFile(agentDir, "prompt/templates/workflows/plan.txt", "Plan this task.");
+    writeFile(agentDir, "resources/memory/MEMORY.md", "Resource memory is separate.");
+    writeFile(agentDir, "skills/review/SKILL.md", "Skill is separate.");
+    writeFile(agentDir, "tools/index.ts", "export const tools = [];");
+
+    const loader = new PromptTemplateLoader({
+      agentDir,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    });
+
+    const snapshot = loader.load();
+
+    assert.deepEqual(snapshot.diagnostics, []);
+    assert.deepEqual(snapshot.templates.map((template) => ({
+      name: template.name,
+      label: template.label,
+      content: template.content,
+      sourceLabel: template.sourceInfo.label,
+      loadedAt: template.loadedAt,
+    })), [
+      {
+        name: "review",
+        label: "review",
+        content: "Review this change.",
+        sourceLabel: "prompt/templates/review.md",
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      },
+      {
+        name: "workflows/plan",
+        label: "plan",
+        content: "Plan this task.",
+        sourceLabel: "prompt/templates/workflows/plan.txt",
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      },
+    ]);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("PromptTemplateLoader creates a registry without touching ResourceCatalog resources", () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeFile(agentDir, "prompt/templates/review.md", "Review this change.");
+    writeFile(agentDir, "resources/instructions/AGENTS.md", "Use project rules.");
+
+    const registry = new PromptTemplateLoader({
+      agentDir,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    }).createRegistry();
+
+    assert.deepEqual(registry.getAllDefinitions().map((template) => template.name), [
+      "review",
+    ]);
+    assert.equal(registry.getDefinition("review")?.content, "Review this change.");
+    assert.equal(registry.getDefinition("instruction:resources/instructions/AGENTS"), undefined);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("PromptTemplateRegistry validates duplicate names and missing lookups", () => {
+  assert.throws(() => createPromptTemplateRegistry([
+    definePromptTemplate({
+      name: "review",
+      label: "Review",
+      content: "Review one.",
+      sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      priority: 100,
+    }),
+    definePromptTemplate({
+      name: "review",
+      label: "Review",
+      content: "Review two.",
+      sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      priority: 100,
+    }),
+  ]), /duplicate template name: review/);
+
+  const registry = createPromptTemplateRegistry([]);
+  assert.throws(() => registry.resolve(["review"]), /does not contain template: review/);
+});
+
+function createTempAgentDir() {
+  return mkdtempSync(join(tmpdir(), "agent-core-prompt-template-"));
+}
+
+function writeFile(root: string, relativePath: string, content: string) {
+  const filePath = join(root, relativePath);
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, content);
+}
