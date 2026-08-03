@@ -1705,10 +1705,11 @@ prompt/prompt-template.ts
 - 复用阶段 B 的 slash command 基础解析。
 - 实现 prompt template registry / discovery v1。已完成第一版：
   `PromptTemplateLoader({ agentDir }).createRegistry()` 扫描 `agent/prompt/templates/`
-  并生成只读 registry；CLI 支持 `/templates` 和 `/template <name>` 查看。
+  并生成只读 registry；模板文件支持轻量 frontmatter 中的 `description` 和
+  `variables`，CLI 支持 `/templates` 和 `/template <name>` 查看模板用途和变量。
 - 实现 prompt template expansion v1。已完成第一版：`/template <name> key=value`
   会用 `{{key}}` 占位渲染模板，并通过 `InputProcessor` 写入
-  `metadata.promptTemplate`。
+  `metadata.promptTemplate`；声明变量会参与缺失变量校验。
 - 实现 skill descriptor / selection v1。
 - 扩展 `ProcessedInput` 的 metadata，让 template / skill 有稳定字段。
   template metadata 已包含 `selectedTemplate`、`inputMode` 和
@@ -1725,6 +1726,7 @@ prompt/prompt-template.ts
 - metadata 可被 `beforeRun` 或 `beforeContext` 消费。
 - template/skill 展开不污染 base system prompt。
 - `/context` 能看到 prompt template 渲染后的 transient message。
+- `/templates` 能看到模板描述和变量名，`/template <name>` 能看到变量说明。
 
 ### 阶段 J：业务能力定义 / Capability Pack
 

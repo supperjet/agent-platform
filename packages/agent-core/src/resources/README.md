@@ -79,8 +79,8 @@ agent/
   runtime options。
 - `agent/resources/` 只放可序列化文本资源。
 - `agent/prompt/templates/` 放按需激活的任务模板，由 `PromptTemplateLoader`
-  发现并注册；后续可由 slash command、workflow 或宿主 UI 渲染为 user prompt
-  或 run-level instruction，不进入 ResourceLoader。
+  发现并注册；当前已支持通过 `/template <name> key=value` 渲染为本轮 transient
+  user message，不进入 ResourceLoader。
 - `agent/prompt/system/` 是未来 prompt 装配配置入口，暂不实现，也不进入
   ResourceLoader。
 - `agent/skills/` 放 `SKILL.md` 风格能力说明，后续由 Skill 模块发现、选择和
@@ -108,7 +108,7 @@ agent/
 
 `prompt/templates/`、`prompt/system/` 和 `skills/` 都不属于 ResourceLoader。
 其中 `prompt/templates/` 已由独立的 PromptTemplate 模块处理；选择、展开和按需
-注入仍由后续 InputProcessor / workflow / Skill 模块接入。
+注入已经接入 InputProcessor / ContextAssembler，workflow 和 Skill 接入后续再扩展。
 
 ## Prompt 边界
 

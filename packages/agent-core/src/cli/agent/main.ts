@@ -757,7 +757,18 @@ function printPromptTemplates(registry: PromptTemplateRegistry) {
     stdout.write("templates: (none)\n");
     return;
   }
-  stdout.write(`templates: ${templates.map((template) => template.name).join(", ")}\n`);
+  stdout.write([
+    "templates:",
+    ...templates.map((template) => {
+      const variables = formatPromptTemplateVariables(template.variableDefinitions);
+      return [
+        `- ${template.name}`,
+        ...(template.description ? [`  description: ${template.description}`] : []),
+        ...(variables ? [`  variables: ${variables}`] : []),
+      ].join("\n");
+    }),
+    "",
+  ].join("\n"));
 }
 
 function printPromptTemplate(registry: PromptTemplateRegistry, name: string) {
@@ -772,11 +783,27 @@ function printPromptTemplate(registry: PromptTemplateRegistry, name: string) {
   }
   stdout.write([
     `template: ${template.name}`,
+    ...(template.description ? [`description: ${template.description}`] : []),
+    ...(template.variableDefinitions?.length
+      ? [
+          "variables:",
+          ...template.variableDefinitions.map((variable) =>
+            `- ${variable.name}${variable.description ? `: ${variable.description}` : ""}`
+          ),
+        ]
+      : []),
     `source: ${template.sourceInfo.label}`,
     "",
     template.content,
     "",
   ].join("\n"));
+}
+
+function formatPromptTemplateVariables(
+  variableDefinitions: readonly { name: string; description?: string }[] | undefined,
+) {
+  if (!variableDefinitions?.length) return "";
+  return variableDefinitions.map((variable) => variable.name).join(", ");
 }
 
 async function printStoredEvents(state: PlaygroundState, runId: string) {

@@ -41,6 +41,21 @@ src/cli/agent/
 
 `resources/` 里存放默认进入上下文的文本资源。`prompt/templates/` 里存放按需渲染成 user prompt 的任务模板，`prompt/system/` 是未来 prompt 装配配置的预留目录。`skills/` 里存放可激活能力说明，`tools/` 里存放从 `tools/index.ts` 导出的可执行工具定义。
 
+Prompt template 支持一个很薄的 frontmatter，用于 `/templates` 列表和变量校验：
+
+```md
+---
+description: Review a code change with findings-first output.
+variables:
+  target: Code path, module, or change to review
+  focus: Review focus, such as tests or regressions
+---
+
+Review {{target}} with focus {{focus}}.
+```
+
+模板仍然不会进入 base system prompt。执行 `/template review target=src focus=tests` 时，渲染结果会作为本轮 transient user message 合并进 messages；原始 `/template ...` 输入仍作为可持久化用户消息写回 conversation。
+
 Loader 和 registry 的职责是分离的：
 
 - `ResourceLoader({ agentDir }).createRegistry()` 发现文本资源并创建资源 registry。
@@ -57,8 +72,8 @@ Loader 和 registry 的职责是分离的：
 /tools all             启用应用入口注册的所有工具。
 /tools none            禁用所有工具。
 /tools inspect_runtime 启用选定的已注册工具。
-/templates             显示发现到的 prompt templates。
-/template review       打印某个 prompt template 的内容。
+/templates             显示发现到的 prompt templates、描述和变量名。
+/template review       打印某个 prompt template 的详情和内容。
 /template review target=src focus=tests
                        渲染模板变量，并把结果作为本轮临时 message 合并进上下文。
 /policy on|off         切换默认 ToolPolicy。

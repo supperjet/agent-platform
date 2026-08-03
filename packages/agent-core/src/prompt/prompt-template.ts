@@ -11,6 +11,11 @@ export type PromptTemplateSourceInfo = {
   scope: PromptTemplateScope;
 };
 
+export type PromptTemplateVariableDefinition = {
+  name: string;
+  description?: string;
+};
+
 /**
  * PromptTemplate 是“任务输入模板”，不是长期上下文资源。
  *
@@ -21,6 +26,8 @@ export type PromptTemplateSourceInfo = {
 export type PromptTemplateDefinition = {
   name: PromptTemplateName;
   label: string;
+  description?: string;
+  variableDefinitions?: readonly PromptTemplateVariableDefinition[];
   content: string;
   sourceInfo: PromptTemplateSourceInfo;
   priority: number;
@@ -36,6 +43,8 @@ export type RenderedPromptTemplate = {
   name: PromptTemplateName;
   content: string;
   variables: Record<string, string>;
+  description?: string;
+  variableDefinitions?: readonly PromptTemplateVariableDefinition[];
   sourceInfo: PromptTemplateSourceInfo;
 };
 
@@ -117,6 +126,11 @@ export function renderPromptTemplate(
   input: PromptTemplateRenderInput,
 ): RenderedPromptTemplate {
   const missingVariables = new Set<string>();
+  for (const variable of input.template.variableDefinitions ?? []) {
+    if (input.variables[variable.name] === undefined) {
+      missingVariables.add(variable.name);
+    }
+  }
   const content = input.template.content.replace(
     /\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/g,
     (_match, variableName: string) => {
@@ -137,6 +151,8 @@ export function renderPromptTemplate(
     name: input.template.name,
     content,
     variables: { ...input.variables },
+    ...(input.template.description ? { description: input.template.description } : {}),
+    ...(input.template.variableDefinitions ? { variableDefinitions: input.template.variableDefinitions } : {}),
     sourceInfo: input.template.sourceInfo,
   };
 }
@@ -236,14 +252,17 @@ export class PromptTemplateLoader {
     diagnostics: PromptTemplateDiagnostic[],
   ): PromptTemplateDefinition | undefined {
     try {
-      const content = readFileSync(filePath, "utf-8").trim();
-      if (!content) return undefined;
+      const fileContent = readFileSync(filePath, "utf-8").trim();
+      if (!fileContent) return undefined;
+      const parsed = parsePromptTemplateFile(fileContent);
+      if (!parsed.content) return undefined;
       const relativePath = normalizePath(relative(this.agentDir, filePath));
       const name = createTemplateName(relativePath);
       return {
         name,
         label: createTemplateLabel(filePath),
-        content,
+        ...parsed.metadata,
+        content: parsed.content,
         sourceInfo: {
           source: "file",
           label: relativePath,
@@ -281,6 +300,12 @@ function normalizePromptTemplateDefinition(
   return {
     name,
     label: normalizeTemplateText(`PromptTemplate.${name}.label`, definition.label),
+    ...(definition.description
+      ? { description: normalizeTemplateText(`PromptTemplate.${name}.description`, definition.description) }
+      : {}),
+    ...(definition.variableDefinitions
+      ? { variableDefinitions: normalizeVariableDefinitions(name, definition.variableDefinitions) }
+      : {}),
     content: normalizeTemplateText(`PromptTemplate.${name}.content`, definition.content),
     sourceInfo: normalizeSourceInfo(name, definition.sourceInfo),
     priority: normalizePriority(name, definition.priority),
@@ -320,6 +345,26 @@ function normalizePriority(templateName: string, priority: number): number {
     throw new Error(`PromptTemplate.${templateName}.priority must be a finite number.`);
   }
   return priority;
+}
+
+function normalizeVariableDefinitions(
+  templateName: string,
+  variables: readonly PromptTemplateVariableDefinition[],
+): readonly PromptTemplateVariableDefinition[] {
+  const seen = new Set<string>();
+  return variables.map((variable) => {
+    const name = normalizeVariableName(`PromptTemplate.${templateName}.variables[].name`, variable.name);
+    if (seen.has(name)) {
+      throw new Error(`PromptTemplate.${templateName}.variables contains duplicate variable: ${name}`);
+    }
+    seen.add(name);
+    return {
+      name,
+      ...(variable.description
+        ? { description: normalizeTemplateText(`PromptTemplate.${templateName}.variables.${name}.description`, variable.description) }
+        : {}),
+    };
+  });
 }
 
 function sortTemplates(
@@ -367,4 +412,77 @@ function normalizePath(path: string): string {
 
 function readErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parsePromptTemplateFile(fileContent: string): {
+  metadata: Pick<PromptTemplateDefinition, "description" | "variableDefinitions">;
+  content: string;
+} {
+  const match = fileContent.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) {
+    return {
+      metadata: {},
+      content: fileContent.trim(),
+    };
+  }
+
+  return {
+    metadata: parsePromptTemplateFrontmatter(match[1] ?? ""),
+    content: fileContent.slice(match[0].length).trim(),
+  };
+}
+
+function parsePromptTemplateFrontmatter(
+  frontmatter: string,
+): Pick<PromptTemplateDefinition, "description" | "variableDefinitions"> {
+  const metadata: Pick<PromptTemplateDefinition, "description" | "variableDefinitions"> = {};
+  const variableDefinitions: PromptTemplateVariableDefinition[] = [];
+  const lines = frontmatter.split(/\r?\n/);
+  let inVariables = false;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const descriptionMatch = line.match(/^description:\s*(.+)$/);
+    if (descriptionMatch?.[1]) {
+      metadata.description = unquoteTemplateValue(descriptionMatch[1].trim());
+      inVariables = false;
+      continue;
+    }
+    if (/^variables:\s*$/.test(line)) {
+      inVariables = true;
+      continue;
+    }
+    if (inVariables) {
+      const variableMatch = line.match(/^\s+([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+      if (variableMatch?.[1]) {
+        variableDefinitions.push({
+          name: variableMatch[1],
+          ...(variableMatch[2]?.trim()
+            ? { description: unquoteTemplateValue(variableMatch[2].trim()) }
+            : {}),
+        });
+      }
+    }
+  }
+
+  if (variableDefinitions.length > 0) {
+    metadata.variableDefinitions = variableDefinitions;
+  }
+  return metadata;
+}
+
+function unquoteTemplateValue(value: string): string {
+  const quote = value[0];
+  if ((quote === "\"" || quote === "'") && value.endsWith(quote)) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function normalizeVariableName(field: string, name: string): string {
+  const normalized = normalizeTemplateText(field, name);
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(normalized)) {
+    throw new Error(`${field} must match [A-Za-z_][A-Za-z0-9_-]*.`);
+  }
+  return normalized;
 }
