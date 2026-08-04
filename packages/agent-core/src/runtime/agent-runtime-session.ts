@@ -17,6 +17,7 @@ import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import { InputProcessor } from "../prompt/input-processor.js";
 import type { ProcessedInput } from "../prompt/input-processor.js";
 import type { PromptTemplateRegistry } from "../prompt/prompt-template.js";
+import type { SkillRegistry } from "../skills/skill-loader.js";
 import type { ToolRuntimeEvent } from "../tools/tool-runtime.js";
 import type { AgentLoop, AgentLoopSnapshot } from "./agent-loop.js";
 import { ContextAssembler, type TurnContext } from "../context/context-assembler.js";
@@ -56,6 +57,8 @@ export type AgentRuntimeSessionOptions = {
   conversationSummarizer?: ConversationSummarizer;
   /** 可选 prompt template registry；用于在输入阶段渲染 `/template <name> key=value`。 */
   promptTemplateRegistry?: PromptTemplateRegistry;
+  /** 可选 skill registry；用于在输入阶段激活 `/skill use <name> ...`。 */
+  skillRegistry?: SkillRegistry;
 };
 
 /**
@@ -191,6 +194,9 @@ export class AgentRuntimeSession extends AgentRuntime {
       ...(options.promptTemplateRegistry
         ? { promptTemplateRegistry: options.promptTemplateRegistry }
         : {}),
+      ...(options.skillRegistry
+        ? { skillRegistry: options.skillRegistry }
+        : {}),
     });
 
     // 创建回合运行器。这里把 RuntimeSession 的收尾钩子注入给 TurnRunner：
@@ -258,6 +264,9 @@ export class AgentRuntimeSession extends AgentRuntime {
     const processedInput = await this.inputProcessor.process({ command });
     if (processedInput.status === "handled") {
       return { status: "succeeded" };
+    }
+    if (processedInput.status === "rejected") {
+      return processedInput.outcome;
     }
     return this.scheduleProcessedInput(processedInput);
   }

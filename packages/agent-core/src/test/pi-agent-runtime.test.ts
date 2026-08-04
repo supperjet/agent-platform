@@ -12,8 +12,10 @@ import {
   createAgentToolRegistry,
   createCompositeCompactionPolicy,
   createPromptTemplateRegistry,
+  createSkillRegistry,
   defineAgentTool,
   definePromptTemplate,
+  defineSkill,
   formatAgentDefinition,
   requireToolApproval,
   PiAgentRuntimeFactory,
@@ -225,6 +227,120 @@ test("runtime session renders prompt templates into transient context messages",
         text: "/template review target=src/runtime.ts focus=tests",
       },
     ]);
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("runtime session activates skills into transient context messages", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-skill-runtime-test" });
+  registration.setResponses([
+    fauxAssistantMessage(fauxText("Skill response."))
+  ]);
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "skill-runtime-agent",
+      model: registration.getModel(),
+      instructions: ["Answer concisely in Chinese."],
+      toolNames: []
+    }),
+    skillRegistry: createSkillRegistry([
+      defineSkill({
+        name: "review",
+        label: "Review",
+        instructions: "Report findings first.",
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+        supportFiles: [],
+        priority: 100,
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      }),
+    ]),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-skill-runtime");
+
+  try {
+    const outcome = await runtime.execute({
+      type: "prompt",
+      text: "/skill use review src/runtime.ts",
+    });
+
+    assert.deepEqual(outcome, { status: "succeeded" });
+    assert.deepEqual(runtime.inspectContext()?.messages.map((message) => ({
+      scope: message.scope,
+      role: message.role,
+      text: message.text,
+    })), [
+      {
+        scope: "transient",
+        role: "user",
+        text: [
+          '<skill name="review" source="test">',
+          "Report findings first.",
+          "",
+          "<arguments>",
+          "src/runtime.ts",
+          "</arguments>",
+          "</skill>",
+        ].join("\n"),
+      },
+      {
+        scope: "persistent",
+        role: "user",
+        text: "/skill use review src/runtime.ts",
+      },
+    ]);
+    assert.deepEqual(
+      runtime.exportState().payload.entries.map((entry) => readTextFromMessage(readEntryMessage(entry))),
+      [
+        "/skill use review src/runtime.ts",
+        "Skill response.",
+      ],
+    );
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("runtime session rejects model-disabled skills until SkillRuntime exists", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-disabled-skill-test" });
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "disabled-skill-agent",
+      model: registration.getModel(),
+      instructions: ["Answer concisely in Chinese."],
+      toolNames: []
+    }),
+    skillRegistry: createSkillRegistry([
+      defineSkill({
+        name: "export-snapshot",
+        label: "Export Snapshot",
+        instructions: "Export runtime state.",
+        disableModelInvocation: true,
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+        supportFiles: [],
+        priority: 100,
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      }),
+    ]),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-disabled-skill");
+
+  try {
+    const outcome = await runtime.execute({
+      type: "prompt",
+      text: "/skill use export-snapshot",
+    });
+
+    assert.deepEqual(outcome, {
+      status: "failed",
+      errorCode: "INPUT_REJECTED",
+      message: [
+        'Skill "export-snapshot" declares disable_model_invocation: true.',
+        "It cannot be executed through prompt injection until SkillRuntime is available.",
+      ].join(" "),
+    });
+    assert.equal(runtime.inspectContext(), undefined);
+    assert.deepEqual(runtime.exportState().payload.entries, []);
   } finally {
     registration.unregister();
   }

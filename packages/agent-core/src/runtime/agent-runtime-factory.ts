@@ -6,6 +6,7 @@ import {
 import type { AgentDefinition } from "../definition/agent-definition.js";
 import type { AgentResourceRegistry } from "../resources/resource-catalog.js";
 import type { PromptTemplateRegistry } from "../prompt/prompt-template.js";
+import type { SkillRegistry } from "../skills/skill-loader.js";
 import type { AgentToolRegistry } from "../tools/tool-registry.js";
 import type { ToolRuntime } from "../tools/tool-runtime.js";
 import type { LifecycleHooks } from "../lifecycle/lifecycle-hooks.js";
@@ -33,6 +34,8 @@ export type PiAgentRuntimeFactoryOptions = {
   toolRegistry?: AgentToolRegistry;
   /** 可选 prompt template registry；用于输入阶段渲染模板并注入本轮 messages。 */
   promptTemplateRegistry?: PromptTemplateRegistry;
+  /** 可选 skill registry；用于输入阶段激活 skill 并注入本轮 messages。 */
+  skillRegistry?: SkillRegistry;
   /** 可选工具运行时；用于注入 policy、approval、生命周期监听等执行控制能力。 */
   toolRuntime?: ToolRuntime;
   /** 可选内部生命周期 hooks；由 factory 接入 TurnRunner 和默认 ToolRuntime。 */
@@ -138,6 +141,9 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
           : {}),
         ...(this.options.promptTemplateRegistry
           ? { promptTemplateRegistry: this.options.promptTemplateRegistry }
+          : {}),
+        ...(this.options.skillRegistry
+          ? { skillRegistry: this.options.skillRegistry }
           : {}),
       },
     );

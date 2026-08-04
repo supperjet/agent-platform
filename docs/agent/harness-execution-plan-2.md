@@ -1712,8 +1712,9 @@ disable_model_invocation: true
 - `name`：稳定 skill 名称。缺省时可由目录名推断，但文件声明优先。
 - `description`：用于 `/skills` 展示和未来模型选择提示。它应该说明何时使用
   这个 skill，而不只是复述名称。
-- `disable_model_invocation`：借鉴 Claude Code 的显式控制字段。V1 只记录和
-  展示，不接自动选择器。
+- `disable_model_invocation`：声明该 skill 不能通过 prompt 注入触发模型回答。
+  在 SkillRuntime 出现前，显式 `/skill use` 会被 runtime 拒绝并返回诊断；
+  后续 SkillRuntime 负责把它接到本地处理、纯查看或纯工具编排路径。
 
 工作项：
 
@@ -1794,8 +1795,8 @@ Tool / Model policy 收口
 ### 阶段 J：Prompt Template / Skill 激活入口
 
 目标：在 InputProcessor v2 的基础 parser 之上，把 prompt template 和 skill
-变成正式 core 扩展能力。Prompt template 已完成发现和显式渲染第一版；本阶段
-后续重点是 skill activation、自动选择和上下文注入。
+变成正式 core 扩展能力。Prompt template 已完成发现和显式渲染第一版；skill
+先从“只读清单”推进到“显式激活即可用”，再逐步展开支持文件和执行编排。
 
 启动条件：
 
@@ -1820,6 +1821,59 @@ prompt/prompt-template.ts
   -> playground 示例验证
 ```
 
+Skill activation 建议分四步推进：
+
+1. **激活即注入上下文**：激活后的 skill `instructions` 作为本轮 transient
+   context 注入，复用 `InputProcessor -> metadata -> ContextAssembler` 的装配
+   路径。metadata 使用独立的 `skillActivation` 字段，不塞进
+   `metadata.promptTemplate`。
+2. **显式触发入口**：保留 `/skill <name>` 作为只读审计入口；新增
+   `/skill use <name> ...` 作为显式激活入口，和 `/template <name> key=value`
+   一样进入 runtime prompt turn。
+3. **支持文件实际展开**：先把 `references/` 注入为 transient context。第一版
+   在 `/skill use <name> ...` 激活时自动读取存在的 `references/`，不读取
+   `templates/` 或 `scripts/`，也不写入长期 conversation state。skill 内
+   `templates/` 已接入第一版渲染：`/skill use <name> key=value ...` 中的
+   `key=value` 会作为模板变量，缺失变量进入 activation diagnostics。
+4. **SkillRuntime / scripts 执行**：仅在出现确定性流程或必须程序执行脚本的需求
+   后再做。执行应复用已有 tools / ToolRuntime / policy / approval，skill 只做
+   编排描述，不另造一套执行器。
+
+Skill activation v1 之后仍欠缺的能力，先按以下顺序排进后续计划：
+
+1. **自动选择 / 自动命中**：根据用户自然语言和 skill `description` 选择候选
+   skill。第一版应只做可解释的候选集和置信度诊断，低置信度时不自动激活。
+2. **别名命令**：允许 `/review ...`、`/create-skill ...` 这类短命令映射到
+   `/skill use <name> ...`，但必须保留冲突诊断，避免和 playground/system 命令
+   抢命名空间。
+3. **references 按需注入**：已接入第一版。后续需要补预算控制、更细粒度选择、
+   读取失败的 UI 诊断和 public event 审计。
+4. **skill 内 templates 渲染**：已接入第一版。后续需要补模板选择、模板级
+   diagnostics 展示、变量说明展示，以及更细粒度的按需展开策略。
+5. **`disable_model_invocation` 策略生效**：已接入第一版。该字段从展示
+   metadata 推进到输入运行策略：声明为 `true` 的 skill 不再进入 prompt 注入 /
+   模型调用路径，显式 `/skill use` 会返回 `INPUT_REJECTED`，提示需要后续
+   SkillRuntime 才能执行。本地处理、纯查看或纯工具编排路径仍留给后续
+   SkillRuntime 实现。
+6. **支持文件 trust policy**：已接入第一版。`SkillSupportFile` 带只读
+   trust policy；`references/` 和 `templates/` 在留在 skill 目录内时允许读取 /
+   注入，`scripts/` 只登记清单，不读取、不注入、不执行。support symlink 会被
+   拒绝并返回 `trust-policy-denied` diagnostics。后续还需要把这些 policy
+   decision 接入 public event / run log 审计，并在 SkillRuntime 阶段复用
+   tools / ToolRuntime / approval。
+7. **诊断可视化**：已接入第一版。CLI 入口会先通过 `SkillLoader.load()`
+   保留 diagnostics，启动时向 stderr 打印 SkillLoader diagnostics；`/skills`
+   会展示 loader diagnostics，`/skill <name>` 会展示支持文件 trust policy 和读取
+   diagnostics。后续还需要把自动选择理由、activation decision 和 policy decision
+   接入 public event / run log 审计。
+8. **激活事件与审计日志**：为 public event / run log 增加稳定的
+   `skill_activated` 或等价记录，包含 skill name、source、触发方式和是否展开
+   支持文件。
+9. **组合使用与冲突处理**：定义多 skill 激活、优先级、互斥、顺序和预算规则。
+   第一版可以只允许单 skill，并对多命中给出诊断。
+10. **真实 agent 目录回归测试**：补针对 `packages/agent-core/src/cli/agent/skills/`
+    下示例 skill 的发现、查看和显式激活测试，防止示例包和 loader 约定漂移。
+
 工作项：
 
 - 复用阶段 B 的 slash command 基础解析。
@@ -1830,24 +1884,32 @@ prompt/prompt-template.ts
 - 实现 prompt template expansion v1。已完成第一版：`/template <name> key=value`
   会用 `{{key}}` 占位渲染模板，并通过 `InputProcessor` 写入
   `metadata.promptTemplate`；声明变量会参与缺失变量校验。
-- 在阶段 G 的 SkillLoader / SkillRegistry 基础上实现 skill selection /
-  activation v1。
+- 在阶段 G 的 SkillLoader / SkillRegistry 基础上实现 skill activation v1：
+  `/skill use <name> ...` 解析为 `metadata.skillActivation`，并把 skill
+  instructions 注入本轮 transient context。
 - 扩展 `ProcessedInput` 的 metadata，让 template / skill 有稳定字段。
   template metadata 已包含 `selectedTemplate`、`inputMode` 和
-  `promptTemplate`。
+  `promptTemplate`；skill metadata 使用 `selectedSkill`、`inputMode` 和
+  `skillActivation`。
 - `ContextAssembler` 消费 template / skill metadata 并注入对应上下文。
   template v1 已作为本轮 transient user message 合并进 messages，不污染 base
-  system prompt，也不写入长期 conversation state。
+  system prompt，也不写入长期 conversation state；skill activation v1 应保持相同
+  边界。
 - 在 CLI playground 中增加 `/template`、`/skill` 或示例 hook。template v1 已接入：
-  `/template <name>` 查看模板，`/template <name> key=value` 执行模板输入。
+  `/template <name>` 查看模板，`/template <name> key=value` 执行模板输入；skill
+  v1 已接入 `/skills`、`/skill <name>` 查看，下一步接入
+  `/skill use <name> ...` 激活。
 
 验收：
 
 - `/review xxx` 这类输入可以被解析并转成 metadata。
 - metadata 可被 `beforeRun` 或 `beforeContext` 消费。
 - template/skill 展开不污染 base system prompt。
-- `/context` 能看到 prompt template 渲染后的 transient message。
+- `/context` 能看到 prompt template 渲染后或 active skill 注入后的 transient
+  message。
 - `/templates` 能看到模板描述和变量名，`/template <name>` 能看到变量说明。
+- `/skill use <name> ...` 会注入 active skill instructions，未知 skill 会失败并
+  给出明确诊断。
 
 ### 阶段 K：业务能力定义 / Capability Pack
 

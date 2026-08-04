@@ -414,7 +414,7 @@ function readErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parsePromptTemplateFile(fileContent: string): {
+export function parsePromptTemplateFile(fileContent: string): {
   metadata: Pick<PromptTemplateDefinition, "description" | "variableDefinitions">;
   content: string;
 } {

@@ -3,6 +3,7 @@ import type { AgentRuntimeCommand } from "../contracts.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import type { RenderedPromptTemplate } from "../prompt/prompt-template.js";
 import { createUserMessage } from "../runtime/messages.js";
+import type { SkillActivation } from "../skills/skill-loader.js";
 import { ContextBudget, type ContextBudgetEstimate } from "./context-budget.js";
 
 export type PromptRuntimeCommand = Extract<AgentRuntimeCommand, { type: "prompt" }>;
@@ -79,8 +80,10 @@ export class ContextAssembler {
 
   async assemble(input: ContextAssemblerInput): Promise<TurnContext> {
     const userMessage = createUserMessage(input.command.text);
+    const skillMessage = createSkillMessage(input.metadata);
     const templateMessage = createTemplateMessage(input.metadata);
     const initialPromptMessages: AgentMessage[] = [
+      ...(skillMessage ? [skillMessage] : []),
       ...(templateMessage ? [templateMessage] : []),
       userMessage,
     ];
@@ -90,6 +93,7 @@ export class ContextAssembler {
     let hookMetadata: Record<string, unknown> | undefined = input.metadata;
     const injectedSources: string[] = [
       ...(input.metadata ? ["input.metadata"] : []),
+      ...(skillMessage ? ["skill.activation.message"] : []),
       ...(templateMessage ? ["prompt.template.message"] : []),
     ];
 
@@ -236,6 +240,75 @@ function createTemplateMessage(
     renderedTemplate.content,
     "</prompt_template>",
   ].join("\n"));
+}
+
+function createSkillMessage(
+  metadata: Record<string, unknown> | undefined,
+): AgentMessage | undefined {
+  const activation = readSkillActivation(metadata);
+  if (!activation) return undefined;
+  return createUserMessage([
+    `<skill name="${escapeXmlAttribute(activation.name)}" source="${escapeXmlAttribute(activation.sourceInfo.label)}">`,
+    activation.instructions,
+    ...(activation.references?.length
+      ? [
+          "",
+          "<references>",
+          ...activation.references.flatMap((reference) => [
+            `<reference source="${escapeXmlAttribute(reference.file.sourceInfo.label)}">`,
+            reference.content,
+            "</reference>",
+          ]),
+          "</references>",
+        ]
+      : []),
+    ...(activation.templates?.length
+      ? [
+          "",
+          "<templates>",
+          ...activation.templates.flatMap((template) => [
+            `<template name="${escapeXmlAttribute(template.name)}" source="${escapeXmlAttribute(template.sourceInfo.label)}">`,
+            template.content,
+            "</template>",
+          ]),
+          "</templates>",
+        ]
+      : []),
+    ...(activation.diagnostics?.length
+      ? [
+          "",
+          "<diagnostics>",
+          ...activation.diagnostics.map((diagnostic) =>
+            `<diagnostic type="${escapeXmlAttribute(diagnostic.type)}" code="${escapeXmlAttribute(diagnostic.code)}">${diagnostic.message}</diagnostic>`
+          ),
+          "</diagnostics>",
+        ]
+      : []),
+    ...(activation.arguments
+      ? [
+          "",
+          "<arguments>",
+          activation.arguments,
+          "</arguments>",
+        ]
+      : []),
+    "</skill>",
+  ].join("\n"));
+}
+
+function readSkillActivation(
+  metadata: Record<string, unknown> | undefined,
+): SkillActivation | undefined {
+  const value = metadata?.skillActivation;
+  if (!value || typeof value !== "object") return undefined;
+  const activation = value as Partial<SkillActivation>;
+  if (typeof activation.name !== "string" || typeof activation.instructions !== "string") return undefined;
+  if (!activation.sourceInfo || typeof activation.sourceInfo.label !== "string") return undefined;
+  if (activation.arguments !== undefined && typeof activation.arguments !== "string") return undefined;
+  if (activation.references !== undefined && !Array.isArray(activation.references)) return undefined;
+  if (activation.templates !== undefined && !Array.isArray(activation.templates)) return undefined;
+  if (activation.diagnostics !== undefined && !Array.isArray(activation.diagnostics)) return undefined;
+  return activation as SkillActivation;
 }
 
 function readRenderedTemplate(

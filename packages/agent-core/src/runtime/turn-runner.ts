@@ -121,6 +121,11 @@ export class TurnRunner {
         await this.options.lifecycleRunner?.afterRun({ status: "succeeded" });
         return { status: "succeeded" };
       }
+      if (processedInput.status === "rejected") {
+        afterRunNotified = true;
+        await this.options.lifecycleRunner?.afterRun({ status: "failed" });
+        return processedInput.outcome;
+      }
       const effectiveCommand = processedInput.command;
 
       // prompt 是唯一完整模型 turn：需要组装上下文、提交给底层 loop、等待 idle、

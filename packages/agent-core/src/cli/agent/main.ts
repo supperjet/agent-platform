@@ -28,6 +28,12 @@ import {
   type PromptTemplateRegistry,
 } from "../../prompt/prompt-template.js";
 import type { AgentResourceRegistry } from "../../resources/resource-catalog.js";
+import {
+  createDefaultSkillRegistry,
+  readSkillSupportFiles,
+  type SkillDiagnostic,
+  type SkillRegistry,
+} from "../../skills/skill-loader.js";
 import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
@@ -46,6 +52,8 @@ const PLAYGROUND_COMMANDS = new Set([
   "tools",
   "templates",
   "template",
+  "skills",
+  "skill",
   "policy",
   "approve",
   "events",
@@ -74,6 +82,8 @@ export type AgentPlaygroundOptions = {
   resourceRegistry: AgentResourceRegistry;
   toolRegistry: AgentToolRegistry;
   promptTemplateRegistry?: PromptTemplateRegistry;
+  skillRegistry?: SkillRegistry;
+  skillDiagnostics?: readonly SkillDiagnostic[];
   workingDirectory?: string;
   conversationFile?: string;
 };
@@ -84,6 +94,8 @@ type PlaygroundState = {
   toolNames: string[];
   resourceNames: string[];
   promptTemplateRegistry: PromptTemplateRegistry;
+  skillRegistry: SkillRegistry;
+  skillDiagnostics: readonly SkillDiagnostic[];
   policyEnabled: boolean;
   compactionEnabled: boolean;
   compactionProtectLastMessages: number;
@@ -146,6 +158,8 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
   const runtimeRecorder: PlaygroundRuntimeRecorder = {};
   const restoredFile = await localStore.load();
   const promptTemplateRegistry = options.promptTemplateRegistry ?? createDefaultPromptTemplateRegistry();
+  const skillRegistry = options.skillRegistry ?? createDefaultSkillRegistry();
+  const skillDiagnostics = options.skillDiagnostics ?? [];
 
   const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
     const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
@@ -155,6 +169,8 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
       toolNames: state?.toolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
       resourceNames: state?.resourceNames ?? options.resourceRegistry.getAllDefinitions().map((resource) => resource.name),
       promptTemplateRegistry,
+      skillRegistry,
+      skillDiagnostics,
       policyEnabled: state?.policyEnabled ?? true,
       compactionEnabled: state?.compactionEnabled ?? false,
       compactionProtectLastMessages: state?.compactionProtectLastMessages ?? 6,
@@ -237,6 +253,9 @@ function createRuntimeState(
     toolRegistry: options.toolRegistry,
     ...(options.promptTemplateRegistry
       ? { promptTemplateRegistry: options.promptTemplateRegistry }
+      : {}),
+    ...(options.skillRegistry
+      ? { skillRegistry: options.skillRegistry }
       : {}),
     toolRuntime,
     lifecycleHooks,
@@ -431,6 +450,18 @@ async function handleCommand(
       return true;
     }
     printPromptTemplate(state.promptTemplateRegistry, value);
+    return true;
+  }
+  if (command === "skills") {
+    printSkills(state.skillRegistry, state.skillDiagnostics);
+    return true;
+  }
+  if (command === "skill") {
+    if (isSkillActivation(value)) {
+      await executePromptLine(state, line);
+      return true;
+    }
+    printSkill(state.skillRegistry, value);
     return true;
   }
   if (command === "policy") {
@@ -799,6 +830,104 @@ function printPromptTemplate(registry: PromptTemplateRegistry, name: string) {
   ].join("\n"));
 }
 
+function printSkills(registry: SkillRegistry, diagnostics: readonly SkillDiagnostic[] = []) {
+  stdout.write(formatSkills(registry, diagnostics));
+}
+
+export function formatSkills(
+  registry: SkillRegistry,
+  diagnostics: readonly SkillDiagnostic[] = [],
+) {
+  const skills = registry.getAllDefinitions();
+  const lines = skills.length === 0
+    ? ["skills: (none)"]
+    : [
+    "skills:",
+    ...skills.map((skill) => [
+      `- ${skill.name}`,
+      ...(skill.description ? [`  description: ${skill.description}`] : []),
+      ...(skill.disableModelInvocation === undefined
+        ? []
+        : [`  disable_model_invocation: ${skill.disableModelInvocation ? "true" : "false"}`]),
+      `  source: ${skill.sourceInfo.label}`,
+      ...(skill.supportFiles.length ? [`  support files: ${skill.supportFiles.length}`] : []),
+    ].join("\n")),
+  ];
+  return [
+    ...lines,
+    ...formatSkillDiagnostics("skill diagnostics", diagnostics),
+    "",
+  ].join("\n");
+}
+
+function printSkill(registry: SkillRegistry, name: string) {
+  stdout.write(formatSkill(registry, name));
+}
+
+export function formatSkill(registry: SkillRegistry, name: string) {
+  if (!name) {
+    return '/skill expects a skill name, for example "/skill review".\n';
+  }
+  const skill = registry.getDefinition(name);
+  if (!skill) {
+    return `skill not found: ${name}\n`;
+  }
+  const supportFileSnapshot = readSkillSupportFiles(skill);
+  return [
+    `skill: ${skill.name}`,
+    ...(skill.description ? [`description: ${skill.description}`] : []),
+    ...(skill.disableModelInvocation === undefined
+      ? []
+      : [`disable_model_invocation: ${skill.disableModelInvocation ? "true" : "false"}`]),
+    `source: ${skill.sourceInfo.label}`,
+    ...(skill.supportFiles.length
+      ? [
+          "support files:",
+          ...skill.supportFiles.map((file) =>
+            [
+              `- ${file.kind}: ${file.sourceInfo.label}`,
+              ...(file.trustPolicy
+                ? [
+                    `  trust: read=${file.trustPolicy.canRead ? "yes" : "no"}, inject=${file.trustPolicy.canInject ? "yes" : "no"}, execute=${file.trustPolicy.canExecute ? "yes" : "no"}`,
+                    `  reason: ${file.trustPolicy.reason}`,
+                  ]
+                : []),
+            ].join("\n")
+          ),
+        ]
+      : ["support files: (none)"]),
+    "",
+    skill.instructions,
+    ...(supportFileSnapshot.files.length
+      ? [
+          "",
+          "support file contents:",
+          ...supportFileSnapshot.files.flatMap(({ file, content }) => [
+            `--- ${file.kind}: ${file.sourceInfo.label} ---`,
+            content.trim(),
+          ]),
+        ]
+      : []),
+    ...formatSkillDiagnostics("support file diagnostics", supportFileSnapshot.diagnostics),
+    "",
+  ].join("\n");
+}
+
+export function formatSkillDiagnostics(
+  title: string,
+  diagnostics: readonly SkillDiagnostic[],
+) {
+  if (diagnostics.length === 0) return [];
+  return [
+    "",
+    `${title}:`,
+    ...diagnostics.map((diagnostic) => [
+      `- ${diagnostic.type}: ${diagnostic.code}: ${diagnostic.message}`,
+      ...(diagnostic.path ? [`  path: ${diagnostic.path}`] : []),
+    ].join("\n")),
+  ];
+}
+
 function formatPromptTemplateVariables(
   variableDefinitions: readonly { name: string; description?: string }[] | undefined,
 ) {
@@ -979,6 +1108,10 @@ function isTemplateInvocation(value: string) {
   return /\s[A-Za-z_][A-Za-z0-9_-]*=/.test(` ${value}`);
 }
 
+function isSkillActivation(value: string) {
+  return /^use\s+[A-Za-z_][A-Za-z0-9_/-]*(?:\s|$)/.test(value);
+}
+
 function parseOnOff(value: string, label: string) {
   if (value === "on") return true;
   if (value === "off") return false;
@@ -1086,6 +1219,10 @@ function printIntro(state: PlaygroundState | undefined) {
     stdout.write(`cwd: ${state.workingDirectory}\n`);
     stdout.write(`tools: ${state.toolNames.join(", ")}\n`);
     stdout.write(`templates: ${state.promptTemplateRegistry.getAllDefinitions().map((template) => template.name).join(", ") || "(none)"}\n`);
+    stdout.write(`skills: ${state.skillRegistry.getAllDefinitions().map((skill) => skill.name).join(", ") || "(none)"}\n`);
+    if (state.skillDiagnostics.length) {
+      stdout.write(`skill diagnostics: ${state.skillDiagnostics.length} (run /skills for details)\n`);
+    }
     stdout.write(`policy: ${state.policyEnabled ? "on" : "off"}, approve: ${state.approvalMode}, events: ${state.eventMode}, lifecycle: ${state.lifecycleMode}\n`);
     stdout.write(formatCompactStatus(state));
   }
@@ -1101,6 +1238,10 @@ function printHelp() {
   /template review       Print one prompt template.
   /template review target=src focus=tests
                          Render a template and send it as transient context.
+  /skills                Show discovered skills.
+  /skill review          Print one skill with support file list and contents.
+  /skill use review src target=src
+                         Activate one skill with references and rendered templates.
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.

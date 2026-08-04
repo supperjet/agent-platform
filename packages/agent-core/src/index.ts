@@ -19,6 +19,7 @@ export * from "./prompt/input-processor.js";
 export * from "./prompt/prompt-template.js";
 export * from "./resources/resource-catalog.js";
 export * from "./resources/resource-loader.js";
+export * from "./skills/skill-loader.js";
 export * from "./tools/built-in/index.js";
 export * from "./tools/operations/index.js";
 export * from "./tools/policy/index.js";

@@ -9,6 +9,9 @@ import { startAgentPlayground } from "./main.js";
 import {
   ResourceLoader,
   PromptTemplateLoader,
+  createSkillRegistry,
+  SkillLoader,
+  type SkillDiagnostic,
   ToolsLoader,
   getDeepSeekModel,
 } from "../../index.js";
@@ -21,6 +24,15 @@ async function main() {
   const workingDirectory = process.cwd();
   const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
   const promptTemplateRegistry = new PromptTemplateLoader({ agentDir }).createRegistry();
+  const skillSnapshot = new SkillLoader({ agentDir }).load();
+  if (skillSnapshot.diagnostics.length) {
+    stderr.write(formatSkillDiagnosticsForStderr(skillSnapshot.diagnostics));
+  }
+  const skillError = skillSnapshot.diagnostics.find((diagnostic) => diagnostic.type === "error");
+  if (skillError) {
+    throw new Error(`SkillLoader failed: ${skillError.message}`);
+  }
+  const skillRegistry = createSkillRegistry(skillSnapshot.skills);
   const toolRegistry = await new ToolsLoader({ agentDir, workingDirectory }).createRegistry();
   // 获取模型
   const model = getDeepSeekModel();
@@ -29,12 +41,25 @@ async function main() {
     model,
     resourceRegistry,
     promptTemplateRegistry,
+    skillRegistry,
+    skillDiagnostics: skillSnapshot.diagnostics,
     toolRegistry,
     workingDirectory,
     resolveApiKey: (provider) => provider === "deepseek"
       ? process.env.DEEPSEEK_API_KEY
       : undefined,
   });
+}
+
+function formatSkillDiagnosticsForStderr(diagnostics: readonly SkillDiagnostic[]) {
+  return [
+    "SkillLoader diagnostics:",
+    ...diagnostics.map((diagnostic) => [
+      `- ${diagnostic.type}: ${diagnostic.code}: ${diagnostic.message}`,
+      ...(diagnostic.path ? [`  path: ${diagnostic.path}`] : []),
+    ].join("\n")),
+    "",
+  ].join("\n");
 }
 
 if (isDirectCliInvocation()) {

@@ -196,6 +196,111 @@ test("ContextAssembler merges rendered prompt template into prompt messages", as
   ]);
 });
 
+test("ContextAssembler merges active skill into transient prompt messages", async () => {
+  const assembler = new ContextAssembler();
+
+  const context = await assembler.assemble({
+    command: { type: "prompt", text: "/skill use review src/runtime.ts" },
+    baseSystemPrompt: "base prompt",
+    conversationMessages: [],
+    metadata: {
+      slashCommand: "skill",
+      inputMode: "skill",
+      selectedSkill: "review",
+      skillActivation: {
+        name: "review",
+        instructions: "Report findings first.",
+        arguments: "src/runtime.ts",
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+      },
+    },
+  });
+
+  assert.deepEqual(context.promptMessages.map(readTextFromMessage), [
+    [
+      '<skill name="review" source="test">',
+      "Report findings first.",
+      "",
+      "<arguments>",
+      "src/runtime.ts",
+      "</arguments>",
+      "</skill>",
+    ].join("\n"),
+    "/skill use review src/runtime.ts",
+  ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [1]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [0]);
+  assert.deepEqual(context.metadata.diagnostics.injectedSources, [
+    "input.metadata",
+    "skill.activation.message",
+  ]);
+});
+
+test("ContextAssembler includes active skill references when provided", async () => {
+  const assembler = new ContextAssembler();
+
+  const context = await assembler.assemble({
+    command: { type: "prompt", text: "/skill use review src/runtime.ts" },
+    baseSystemPrompt: "base prompt",
+    conversationMessages: [],
+    metadata: {
+      slashCommand: "skill",
+      inputMode: "skill",
+      selectedSkill: "review",
+      skillActivation: {
+        name: "review",
+        instructions: "Report findings first.",
+        arguments: "src/runtime.ts",
+        sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
+        references: [{
+          file: {
+            kind: "reference",
+            label: "checklist.md",
+            path: "/tmp/checklist.md",
+            sourceInfo: { source: "file", label: "skills/review/references/checklist.md", scope: "project" },
+          },
+          content: "Check regressions.",
+        }],
+        templates: [{
+          name: "finding",
+          content: "Finding for src/runtime.ts.",
+          variables: {
+            target: "src/runtime.ts",
+          },
+          sourceInfo: { source: "file", label: "skills/review/templates/finding.md", scope: "project" },
+        }],
+      },
+    },
+  });
+
+  assert.deepEqual(context.promptMessages.map(readTextFromMessage), [
+    [
+      '<skill name="review" source="test">',
+      "Report findings first.",
+      "",
+      "<references>",
+      '<reference source="skills/review/references/checklist.md">',
+      "Check regressions.",
+      "</reference>",
+      "</references>",
+      "",
+      "<templates>",
+      '<template name="finding" source="skills/review/templates/finding.md">',
+      "Finding for src/runtime.ts.",
+      "</template>",
+      "</templates>",
+      "",
+      "<arguments>",
+      "src/runtime.ts",
+      "</arguments>",
+      "</skill>",
+    ].join("\n"),
+    "/skill use review src/runtime.ts",
+  ]);
+  assert.deepEqual(context.persistentPromptMessageIndexes, [1]);
+  assert.deepEqual(context.transientPromptMessageIndexes, [0]);
+});
+
 test("ContextAssembler preserves rendered template when beforeRun adds messages", async () => {
   const assembler = new ContextAssembler({
     lifecycleRunner: createLifecycleRunner({

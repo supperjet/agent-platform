@@ -1,10 +1,18 @@
-import type { AgentRuntimeCommand } from "../contracts.js";
+import type {
+  AgentExecutionOutcome,
+  AgentRuntimeCommand,
+} from "../contracts.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import {
   renderPromptTemplate,
   type PromptTemplateRegistry,
   type RenderedPromptTemplate,
 } from "./prompt-template.js";
+import {
+  activateSkill,
+  type SkillActivation,
+  type SkillRegistry,
+} from "../skills/skill-loader.js";
 
 /**
  * InputProcessor 的处理输入。
@@ -21,7 +29,9 @@ export type InputMetadata = Record<string, unknown> & {
   slashCommand?: string;
   inputMode?: string;
   selectedTemplate?: string;
+  selectedSkill?: string;
   promptTemplate?: RenderedPromptTemplate;
+  skillActivation?: SkillActivation;
   args?: Record<string, unknown>;
 };
 
@@ -33,13 +43,19 @@ export type InputMetadata = Record<string, unknown> & {
  */
 export type ProcessedInput =
   | { status: "ready"; command: AgentRuntimeCommand; metadata?: InputMetadata }
+  | { status: "rejected"; outcome: AgentExecutionOutcome }
   | { status: "handled" };
+
+type RejectedInput = Extract<ProcessedInput, { status: "rejected" }>;
+type SkillActivationMetadataResult = InputMetadata | RejectedInput | undefined;
 
 export type InputProcessorOptions = {
   /** 生命周期执行器；第一版只接入 onInput，后续 prompt template/skill 展开也会挂在这里。 */
   lifecycleRunner?: LifecycleRunner;
   /** 可选 prompt template registry；提供后 `/template <name> key=value` 会渲染模板。 */
   promptTemplateRegistry?: PromptTemplateRegistry;
+  /** 可选 skill registry；提供后 `/skill use <name> ...` 会激活 skill。 */
+  skillRegistry?: SkillRegistry;
 };
 
 /**
@@ -83,10 +99,12 @@ export class InputProcessor {
         inputResult.metadata,
       );
       const templateMetadata = this.renderTemplateMetadata(inputResult.command, metadata);
+      const expansionMetadata = this.renderSkillActivationMetadata(inputResult.command, templateMetadata);
+      if (isRejectedInput(expansionMetadata)) return expansionMetadata;
       return {
         status: "ready",
         command: inputResult.command,
-        ...(templateMetadata ? { metadata: templateMetadata } : {}),
+        ...(expansionMetadata ? { metadata: expansionMetadata } : {}),
       };
     }
 
@@ -95,11 +113,13 @@ export class InputProcessor {
       inputResult?.metadata,
     );
     const templateMetadata = this.renderTemplateMetadata(input.command, metadata);
+    const expansionMetadata = this.renderSkillActivationMetadata(input.command, templateMetadata);
+    if (isRejectedInput(expansionMetadata)) return expansionMetadata;
 
     return {
       status: "ready",
       command: input.command,
-      ...(templateMetadata ? { metadata: templateMetadata } : {}),
+      ...(expansionMetadata ? { metadata: expansionMetadata } : {}),
     };
   }
 
@@ -134,6 +154,56 @@ export class InputProcessor {
       },
     });
   }
+
+  private renderSkillActivationMetadata(
+    command: AgentRuntimeCommand,
+    metadata: InputMetadata | undefined,
+  ): SkillActivationMetadataResult {
+    if (!metadata || command.type !== "prompt") return metadata;
+    if (metadata.slashCommand !== "skill") return metadata;
+    const registry = this.options.skillRegistry;
+    if (!registry) return metadata;
+    const rawArgs = readRawArgs(metadata);
+    if (!rawArgs) return metadata;
+    const invocation = parseSkillUseInvocation(rawArgs);
+    if (!invocation) return metadata;
+    const skill = registry.getDefinition(invocation.name);
+    if (!skill) {
+      throw new Error(`Skill not found: ${invocation.name}`);
+    }
+    if (skill.disableModelInvocation) {
+      return {
+        status: "rejected",
+        outcome: {
+          status: "failed",
+          errorCode: "INPUT_REJECTED",
+          message: [
+            `Skill "${skill.name}" declares disable_model_invocation: true.`,
+            "It cannot be executed through prompt injection until SkillRuntime is available.",
+          ].join(" "),
+        },
+      };
+    }
+    const activation = activateSkill(skill, {
+      ...(invocation.arguments ? { arguments: invocation.arguments } : {}),
+      ...(Object.keys(invocation.variables).length ? { variables: invocation.variables } : {}),
+    });
+    return mergeInputMetadata(metadata, {
+      inputMode: "skill",
+      selectedSkill: activation.name,
+      skillActivation: activation,
+      args: {
+        ...metadata.args,
+        skillName: activation.name,
+        ...(activation.arguments ? { skillArguments: activation.arguments } : {}),
+        ...(Object.keys(invocation.variables).length ? { variables: invocation.variables } : {}),
+      },
+    });
+  }
+}
+
+function isRejectedInput(value: SkillActivationMetadataResult): value is RejectedInput {
+  return Boolean(value && "status" in value && value.status === "rejected");
 }
 
 function parseInputMetadata(command: AgentRuntimeCommand): InputMetadata | undefined {
@@ -189,6 +259,48 @@ function parseTemplateInvocation(rawArgs: string): {
     variables[key] = value;
   }
   return { name, variables };
+}
+
+function parseSkillUseInvocation(rawArgs: string): {
+  name: string;
+  arguments?: string;
+  variables: Record<string, string>;
+} | undefined {
+  const match = rawArgs.match(/^use\s+([A-Za-z_][A-Za-z0-9_/-]*)(?:\s+([\s\S]*))?$/);
+  const name = match?.[1];
+  if (!name) return undefined;
+  const parsedArguments = parseSkillUseArguments(match[2]?.trim() ?? "");
+  return {
+    name,
+    ...(parsedArguments.arguments ? { arguments: parsedArguments.arguments } : {}),
+    variables: parsedArguments.variables,
+  };
+}
+
+function parseSkillUseArguments(rawArgs: string): {
+  arguments?: string;
+  variables: Record<string, string>;
+} {
+  const variables: Record<string, string> = {};
+  const argumentTokens: string[] = [];
+  for (const token of tokenizeTemplateArgs(rawArgs)) {
+    const separatorIndex = token.indexOf("=");
+    if (separatorIndex > 0) {
+      const key = token.slice(0, separatorIndex).trim();
+      const value = token.slice(separatorIndex + 1).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)) {
+        throw new Error(`Skill template variable name is invalid: ${key}`);
+      }
+      variables[key] = value;
+      continue;
+    }
+    argumentTokens.push(token);
+  }
+  const skillArguments = argumentTokens.join(" ").trim();
+  return {
+    ...(skillArguments ? { arguments: skillArguments } : {}),
+    variables,
+  };
 }
 
 function tokenizeTemplateArgs(rawArgs: string): string[] {

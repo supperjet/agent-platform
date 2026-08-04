@@ -35,7 +35,7 @@ src/cli/agent/
   tools/
 ```
 
-`agent/index.ts` 是应用入口点。它加载默认的 DeepSeek 模型，为 agent 目录创建 `ResourceLoader`、`PromptTemplateLoader` 和 `ToolsLoader`，并把生成的 registry 传入 `startAgentPlayground`。
+`agent/index.ts` 是应用入口点。它加载默认的 DeepSeek 模型，为 agent 目录创建 `ResourceLoader`、`PromptTemplateLoader`、`SkillLoader` 和 `ToolsLoader`，并把生成的 registry 传入 `startAgentPlayground`。
 
 `agent/main.ts` 拥有 playground 的运行时循环。它的 `AgentPlaygroundOptions` 接收已经组装好的运行时依赖和可选的 `conversationFile`；它不发现资源、不加载模型、也不注册工具。
 
@@ -56,10 +56,30 @@ Review {{target}} with focus {{focus}}.
 
 模板仍然不会进入 base system prompt。执行 `/template review target=src focus=tests` 时，渲染结果会作为本轮 transient user message 合并进 messages；原始 `/template ...` 输入仍作为可持久化用户消息写回 conversation。
 
+Skill 使用 `agent/skills/**/SKILL.md` 目录能力包约定。V1 发现 metadata、正文 instructions 和 `references/`、`templates/`、`scripts/` 支持文件清单；显式执行 `/skill <name>` 查看详情时才读取允许读取的支持文件内容，显式执行 `/skill use <name> ...` 时会把 skill instructions、存在的 `references/` 内容，以及用 `key=value` 渲染后的 skill 内 `templates/` 作为本轮 transient context 注入。`scripts/` 只登记清单，不读取、不注入、不执行；support symlink 会被 trust policy 拒绝并返回 diagnostics。启动时会向 stderr 打印 SkillLoader diagnostics，`/skills` 会展示 loader diagnostics，`/skill <name>` 会展示支持文件 trust policy 和读取 diagnostics。不会自动选择 skill：
+
+```md
+---
+name: review
+description: Review code changes and report findings first.
+disable_model_invocation: true
+---
+
+## Instructions
+
+Report findings first, ordered by severity.
+```
+
+`disable-model-invocation` 也会作为兼容别名解析，但 CLI 展示统一使用
+`disable_model_invocation`。声明 `disable_model_invocation: true` 的 skill 不会通过
+prompt 注入执行；在 SkillRuntime 接入前，显式 `/skill use <name>` 会返回
+`INPUT_REJECTED` 诊断，避免误触发模型调用。
+
 Loader 和 registry 的职责是分离的：
 
 - `ResourceLoader({ agentDir }).createRegistry()` 发现文本资源并创建资源 registry。
 - `PromptTemplateLoader({ agentDir }).createRegistry()` 发现 `prompt/templates/` 下的任务模板并创建模板 registry。
+- `SkillLoader({ agentDir }).createRegistry()` 发现 `skills/**/SKILL.md` 能力包并创建 skill registry。
 - `ToolsLoader({ agentDir }).createRegistry()` 注册核心内置工具、导入 `tools/index.js`，并创建工具 registry。
 - `startAgentPlayground` 只接收 registries，不暴露 loader 参数。
 
@@ -76,6 +96,10 @@ Loader 和 registry 的职责是分离的：
 /template review       打印某个 prompt template 的详情和内容。
 /template review target=src focus=tests
                        渲染模板变量，并把结果作为本轮临时 message 合并进上下文。
+/skills                显示发现到的 skills、描述和来源。
+/skill review          打印某个 skill 的 instructions、支持文件清单和支持文件内容。
+/skill use review src target=src
+                       激活某个 skill，并把 instructions、references/ 和渲染后的 templates/ 注入本轮临时上下文。
 /policy on|off         切换默认 ToolPolicy。
 /approve ask|always|never  设置审批策略。
 /events on|off|json    切换 AgentRuntime 和 ToolRuntime 事件打印。
