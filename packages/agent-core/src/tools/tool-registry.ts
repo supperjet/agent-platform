@@ -129,7 +129,7 @@ export function createAgentToolRegistry(tools: readonly AnyAgentToolDefinition[]
   const entriesByName = new Map<string, AgentToolRegistryEntry>();
 
   for (const tool of tools) {
-    assertNonBlank("AgentToolRegistry.tools[].name", tool.name);
+    assertValidToolName("AgentToolRegistry.tools[].name", tool.name);
     if (entriesByName.has(tool.name)) {
       throw new Error(`AgentToolRegistry contains duplicate tool name: ${tool.name}`);
     }
@@ -194,6 +194,13 @@ export function wrapAgentToolDefinition(definition: AnyAgentToolDefinition): Age
 function assertNonBlank(field: string, value: string) {
   if (value.trim().length === 0) {
     throw new Error(`${field} must be a non-empty string.`);
+  }
+}
+
+function assertValidToolName(field: string, value: string) {
+  assertNonBlank(field, value);
+  if (!/^[a-zA-Z0-9_-]+$/.test(value.trim())) {
+    throw new Error(`${field} must match ^[a-zA-Z0-9_-]+$: ${value}`);
   }
 }
 

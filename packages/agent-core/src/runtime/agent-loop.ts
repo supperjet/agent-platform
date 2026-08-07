@@ -1,8 +1,10 @@
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 
 export type AgentLoopPromptOptions = {
   /** 仅作用于本次 prompt run 的 system prompt override。 */
   systemPrompt?: string;
+  /** 仅作用于本次 prompt run 的工具集合 override。 */
+  tools?: readonly AgentTool[];
 };
 
 /**

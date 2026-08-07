@@ -201,6 +201,109 @@ test("SkillLoader reports invalid frontmatter as diagnostics", () => {
   }
 });
 
+test("SkillLoader infers executable script metadata from file extension", () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeFile(agentDir, "skills/collect/SKILL.md", "Collect data.");
+    writeFile(agentDir, "skills/collect/scripts/collect.sh", "echo collect\n");
+    writeFile(agentDir, "skills/collect/scripts/collect.js", [
+      "/*---",
+      "arg_numbers: number[] required Numbers to collect",
+      "---*/",
+      "console.log('collect');",
+    ].join("\n"));
+
+    const snapshot = new SkillLoader({
+      agentDir,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    }).load();
+    const scripts = snapshot.skills[0]?.supportFiles
+      .filter((file) => file.kind === "script")
+      .map((file) => ({
+        label: file.label,
+        canExecute: file.trustPolicy?.canExecute,
+        script: file.script,
+      }));
+
+    assert.deepEqual(scripts, [
+      {
+        label: "collect.js",
+        canExecute: true,
+        script: {
+          execute: true,
+          sandbox: "local",
+          interpreter: "node",
+          timeoutMs: 5000,
+          outputLimitBytes: 1048576,
+          args: [{
+            name: "numbers",
+            type: "number[]",
+            required: true,
+            description: "Numbers to collect",
+          }],
+        },
+      },
+      {
+        label: "collect.sh",
+        canExecute: true,
+        script: {
+          execute: true,
+          sandbox: "virtual",
+          interpreter: "bash",
+          timeoutMs: 5000,
+          outputLimitBytes: 1048576,
+        },
+      },
+    ]);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("SkillLoader maps script frontmatter overrides to execute trust policy", () => {
+  const agentDir = createTempAgentDir();
+  try {
+    writeFile(agentDir, "skills/collect/SKILL.md", "Collect data.");
+    writeFile(agentDir, "skills/collect/scripts/collect.sh", [
+      "---",
+      "execute: true",
+      "sandbox: virtual",
+      "timeout_ms: 500",
+      "output_limit_bytes: 64",
+      "---",
+      "echo collect",
+    ].join("\n"));
+
+    const snapshot = new SkillLoader({
+      agentDir,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    }).load();
+    const script = snapshot.skills[0]?.supportFiles[0];
+
+    assert.deepEqual({
+      kind: script?.kind,
+      canRead: script?.trustPolicy?.canRead,
+      canInject: script?.trustPolicy?.canInject,
+      canExecute: script?.trustPolicy?.canExecute,
+      script: script?.script,
+    }, {
+      kind: "script",
+      canRead: false,
+      canInject: false,
+      canExecute: true,
+      script: {
+        execute: true,
+        sandbox: "virtual",
+        interpreter: "bash",
+        timeoutMs: 500,
+        outputLimitBytes: 64,
+      },
+    });
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("readSkillSupportFiles reads support content and reports missing files as diagnostics", () => {
   const agentDir = createTempAgentDir();
   try {
@@ -344,6 +447,7 @@ test("activateSkill renders skill templates and reports missing variables", () =
   const agentDir = createTempAgentDir();
   try {
     writeFile(agentDir, "skills/review/SKILL.md", "Review carefully.");
+    writeFile(agentDir, "skills/review/references/checklist.md", "Check regressions.");
     writeFile(agentDir, "skills/review/templates/finding.md", [
       "---",
       "description: Finding template.",
@@ -353,6 +457,7 @@ test("activateSkill renders skill templates and reports missing variables", () =
       "",
       "Finding for {{target}}.",
     ].join("\n"));
+    writeFile(agentDir, "skills/review/scripts/collect.js", "console.log('collect');");
     const snapshot = new SkillLoader({
       agentDir,
       now: () => new Date("2026-08-03T00:00:00.000Z"),
@@ -363,6 +468,56 @@ test("activateSkill renders skill templates and reports missing variables", () =
     const rendered = activateSkill(skill, { variables: { target: "src/runtime.ts" } });
     const missing = activateSkill(skill);
 
+    assert.deepEqual(rendered.supportFiles?.map((file) => ({
+      kind: file.kind,
+      label: file.label,
+      sourceLabel: file.sourceInfo.label,
+      canRead: file.trustPolicy.canRead,
+      canInject: file.trustPolicy.canInject,
+      canExecute: file.trustPolicy.canExecute,
+      script: file.script,
+      template: file.template,
+    })), [{
+      kind: "reference",
+      label: "checklist.md",
+      sourceLabel: "skills/review/references/checklist.md",
+      canRead: true,
+      canInject: true,
+      canExecute: false,
+      script: undefined,
+      template: undefined,
+    }, {
+      kind: "script",
+      label: "collect.js",
+      sourceLabel: "skills/review/scripts/collect.js",
+      canRead: false,
+      canInject: false,
+      canExecute: true,
+      script: {
+        execute: true,
+        sandbox: "local",
+        interpreter: "node",
+        timeoutMs: 5000,
+        outputLimitBytes: 1048576,
+      },
+      template: undefined,
+    }, {
+      kind: "template",
+      label: "finding.md",
+      sourceLabel: "skills/review/templates/finding.md",
+      canRead: true,
+      canInject: true,
+      canExecute: false,
+      script: undefined,
+      template: {
+        name: "finding",
+        description: "Finding template.",
+        variableDefinitions: [{
+          name: "target",
+          description: "File or directory to review.",
+        }],
+      },
+    }]);
     assert.deepEqual(rendered.templates?.map((template) => ({
       name: template.name,
       content: template.content,

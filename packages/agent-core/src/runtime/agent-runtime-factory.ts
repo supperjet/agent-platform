@@ -18,6 +18,7 @@ import { AgentLoopAdapter } from "./agent-loop-adapter.js";
 import { AgentRuntimeSession } from "./agent-runtime-session.js";
 import { RuntimeAssembler } from "./runtime-assembler.js";
 import type { RuntimeAssemblerOptions } from "./runtime-assembler.js";
+import type { TurnContext } from "../context/context-assembler.js";
 
 /**
  * 创建 PiAgentRuntimeFactory 所需的外部依赖。
@@ -38,6 +39,11 @@ export type PiAgentRuntimeFactoryOptions = {
   skillRegistry?: SkillRegistry;
   /** 可选工具运行时；用于注入 policy、approval、生命周期监听等执行控制能力。 */
   toolRuntime?: ToolRuntime;
+  /** 根据本轮 context 和基础工具名返回本轮工具名，用于动态工具暴露。 */
+  resolveTurnToolNames?: (input: {
+    context: TurnContext;
+    baseToolNames: readonly string[];
+  }) => readonly string[] | undefined;
   /** 可选内部生命周期 hooks；由 factory 接入 TurnRunner 和默认 ToolRuntime。 */
   lifecycleHooks?: LifecycleHooks;
   /** 可选运行时策略；默认保持 queue direct / retry none / compaction disabled。 */
@@ -78,6 +84,9 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
     }
     if (this.options.toolRegistry) {
       assemblerParams.toolRegistry = this.options.toolRegistry;
+    }
+    if (this.options.resolveTurnToolNames) {
+      assemblerParams.resolveTurnToolNames = this.options.resolveTurnToolNames;
     }
     if (this.options.toolRuntime || this.options.lifecycleHooks || this.options.policies) {
       assemblerParams.services = {
@@ -144,6 +153,9 @@ export class PiAgentRuntimeFactory extends AgentRuntimeFactory {
           : {}),
         ...(this.options.skillRegistry
           ? { skillRegistry: this.options.skillRegistry }
+          : {}),
+        ...(assembly.resolveTurnTools
+          ? { resolveTurnTools: assembly.resolveTurnTools }
           : {}),
       },
     );

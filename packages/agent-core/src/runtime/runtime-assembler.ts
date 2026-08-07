@@ -40,6 +40,7 @@ import {
   type ToolRuntime,
   type ToolRuntimeEventListener,
 } from "../tools/tool-runtime.js";
+import type { TurnContext } from "../context/context-assembler.js";
 
 /**
  * RuntimeAssembler 单次装配输入。
@@ -82,6 +83,8 @@ export type RuntimeAssembly = {
   toolPlan: ToolCatalogResolution;
   /** 已经通过 ToolRuntime 包装过的可执行工具集合。 */
   tools: readonly AgentTool[];
+  /** 根据本轮 context 动态解析工具集合；未配置时保持 undefined。 */
+  resolveTurnTools?: (context: TurnContext) => readonly AgentTool[] | undefined;
   /** 模型网关，负责按 provider 解析 API key。 */
   modelGateway: ModelGateway;
   /** 供底层 AgentLoopAdapter 使用的 API key resolver。 */
@@ -120,6 +123,11 @@ export type RuntimeAssemblerOptions = {
   resourceRegistry?: AgentResourceRegistry;
   /** 注入工具注册表，交给 ToolCatalog 使用。 */
   toolRegistry?: AgentToolRegistry;
+  /** 根据本轮 context 和基础工具名返回本轮工具名，用于动态工具暴露。 */
+  resolveTurnToolNames?: (input: {
+    context: TurnContext;
+    baseToolNames: readonly string[];
+  }) => readonly string[] | undefined;
 };
 
 /**
@@ -134,7 +142,7 @@ export type RuntimeAssemblerOptions = {
 export class RuntimeAssembler {
   private readonly services: RuntimeAssemblerServices;
 
-  constructor(options: RuntimeAssemblerOptions = {}) {
+  constructor(private readonly options: RuntimeAssemblerOptions = {}) {
     this.services = createRuntimeAssemblerServices(options);
   }
 
@@ -189,6 +197,13 @@ export class RuntimeAssembler {
       },
       input.onToolRuntimeEvent,
     );
+    const turnToolResolverInput = {
+      definition,
+      baseToolNames: toolPlan.toolNames,
+      sessionId: input.sessionId,
+      ...(input.onToolRuntimeEvent ? { onToolRuntimeEvent: input.onToolRuntimeEvent } : {}),
+    };
+    const resolveTurnTools = this.createTurnToolResolver(turnToolResolverInput);
 
     return {
       definition,
@@ -200,10 +215,41 @@ export class RuntimeAssembler {
       messages: conversation.messages,
       toolPlan,
       tools,
+      ...(resolveTurnTools ? { resolveTurnTools } : {}),
       modelGateway,
       getApiKey: (provider) => modelGateway.getApiKey(provider),
       lifecycle: this.services.lifecycleHooks,
       policies: this.services.policies,
+    };
+  }
+
+  private createTurnToolResolver(input: {
+    definition: ResolvedAgentDefinition;
+    baseToolNames: readonly string[];
+    sessionId: string;
+    onToolRuntimeEvent?: ToolRuntimeEventListener;
+  }): ((context: TurnContext) => readonly AgentTool[] | undefined) | undefined {
+    const resolveTurnToolNames = this.options.resolveTurnToolNames;
+    if (!resolveTurnToolNames) return undefined;
+    return (context) => {
+      const toolNames = resolveTurnToolNames({
+        context,
+        baseToolNames: input.baseToolNames,
+      });
+      if (!toolNames) return undefined;
+      const turnToolPlan = this.services.toolCatalog.resolvePlan({
+        definition: input.definition,
+        toolNames,
+      });
+      return wrapToolsWithRuntime(
+        turnToolPlan.tools,
+        this.services.toolRuntime,
+        {
+          sessionId: input.sessionId,
+          definitionId: input.definition.id,
+        },
+        input.onToolRuntimeEvent,
+      );
     };
   }
 }

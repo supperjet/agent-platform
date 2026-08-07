@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   parsePromptTemplateFile,
   renderPromptTemplate,
@@ -26,17 +26,58 @@ export type SkillSupportFileTrustPolicy = {
   reason: string;
 };
 
+export type SkillScriptArgumentType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "string[]"
+  | "number[]"
+  | "boolean[]"
+  | "json";
+
+export type SkillScriptArgumentDefinition = {
+  name: string;
+  type: SkillScriptArgumentType;
+  required?: boolean;
+  description?: string;
+};
+
+export type SkillScriptMetadata = {
+  execute?: boolean;
+  sandbox?: "virtual" | "local";
+  interpreter?: "bash" | "node";
+  timeoutMs?: number;
+  outputLimitBytes?: number;
+  args?: readonly SkillScriptArgumentDefinition[];
+};
+
 export type SkillSupportFile = {
   kind: SkillSupportFileKind;
   label: string;
   path: string;
   sourceInfo: SkillSourceInfo;
   trustPolicy?: SkillSupportFileTrustPolicy;
+  script?: SkillScriptMetadata;
 };
 
 export type SkillSupportFileContent = {
   file: SkillSupportFile;
   content: string;
+};
+
+export type SkillTemplateMetadata = {
+  name: string;
+  description?: string;
+  variableDefinitions?: PromptTemplateDefinition["variableDefinitions"];
+};
+
+export type SkillSupportFileManifestEntry = {
+  kind: SkillSupportFileKind;
+  label: string;
+  sourceInfo: SkillSourceInfo;
+  trustPolicy: SkillSupportFileTrustPolicy;
+  script?: SkillScriptMetadata;
+  template?: SkillTemplateMetadata;
 };
 
 /**
@@ -86,6 +127,7 @@ export type SkillActivation = {
   instructions: string;
   sourceInfo: SkillSourceInfo;
   arguments?: string;
+  supportFiles?: readonly SkillSupportFileManifestEntry[];
   templates?: readonly RenderedPromptTemplate[];
   references?: readonly SkillSupportFileContent[];
   diagnostics?: readonly SkillDiagnostic[];
@@ -106,6 +148,8 @@ export type SkillLoaderOptions = {
 
 const SKILLS_DIRECTORY = "skills";
 const SKILL_ENTRY_FILENAME = "SKILL.md";
+const DEFAULT_SCRIPT_TIMEOUT_MS = 5_000;
+const DEFAULT_SCRIPT_OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const SUPPORT_DIRECTORIES: Record<string, SkillSupportFileKind> = {
   references: "reference",
   templates: "template",
@@ -163,6 +207,12 @@ export function readSkillTemplateFiles(skill: LoadedSkill): LoadedSkillSupportFi
   return readSkillSupportFilesByKind(skill, ["template"]);
 }
 
+export function resolveSkillSupportFileTrustPolicy(
+  file: SkillSupportFile,
+): SkillSupportFileTrustPolicy {
+  return normalizeSupportFileTrustPolicy(file.kind, file.trustPolicy);
+}
+
 function readSkillSupportFilesByKind(
   skill: LoadedSkill,
   kinds?: readonly SkillSupportFileKind[],
@@ -171,7 +221,7 @@ function readSkillSupportFilesByKind(
   const diagnostics: SkillDiagnostic[] = [];
   const acceptedKinds = kinds ? new Set(kinds) : undefined;
   for (const file of skill.supportFiles.filter((file) => !acceptedKinds || acceptedKinds.has(file.kind))) {
-    const trustPolicy = normalizeSupportFileTrustPolicy(file.kind, file.trustPolicy);
+    const trustPolicy = resolveSkillSupportFileTrustPolicy(file);
     if (!trustPolicy.canRead) {
       diagnostics.push({
         type: "warning",
@@ -213,6 +263,7 @@ export function activateSkill(
     instructions: skill.instructions,
     sourceInfo: skill.sourceInfo,
     ...(options.arguments ? { arguments: options.arguments } : {}),
+    ...(skill.supportFiles.length ? { supportFiles: createSkillSupportFileManifest(skill) } : {}),
     ...(referenceSnapshot?.files.length ? { references: referenceSnapshot.files } : {}),
     ...(templateSnapshot.templates.length ? { templates: templateSnapshot.templates } : {}),
     ...(diagnostics.length ? { diagnostics } : {}),
@@ -220,6 +271,38 @@ export function activateSkill(
       ? {}
       : { disableModelInvocation: skill.disableModelInvocation }),
   };
+}
+
+function createSkillSupportFileManifest(
+  skill: LoadedSkill,
+): readonly SkillSupportFileManifestEntry[] {
+  return skill.supportFiles.map((file) => ({
+    kind: file.kind,
+    label: file.label,
+    sourceInfo: file.sourceInfo,
+    trustPolicy: resolveSkillSupportFileTrustPolicy(file),
+    ...(file.script ? { script: file.script } : {}),
+    ...(file.kind === "template" ? createTemplateManifestEntry(file) : {}),
+  }));
+}
+
+function createTemplateManifestEntry(
+  file: SkillSupportFile,
+): { template: SkillTemplateMetadata } | Record<string, never> {
+  try {
+    const parsed = parsePromptTemplateFile(readFileSync(file.path, "utf-8"));
+    return {
+      template: {
+        name: createSkillTemplateName(file.sourceInfo.label),
+        ...(parsed.metadata.description ? { description: parsed.metadata.description } : {}),
+        ...(parsed.metadata.variableDefinitions
+          ? { variableDefinitions: parsed.metadata.variableDefinitions }
+          : {}),
+      },
+    };
+  } catch {
+    return {};
+  }
 }
 
 function renderSkillTemplates(
@@ -516,6 +599,9 @@ export class SkillLoader {
         continue;
       }
       const relativePath = normalizePath(relative(this.agentDir, entryPath));
+      const script = kind === "script"
+        ? readSkillScriptMetadata(entryPath, diagnostics)
+        : undefined;
       files.push({
         kind,
         label: basename(entryPath),
@@ -526,7 +612,8 @@ export class SkillLoader {
           path: entryPath,
           scope: "project",
         },
-        trustPolicy: createSupportFileTrustPolicy(kind),
+        trustPolicy: createSupportFileTrustPolicy(kind, script),
+        ...(script ? { script } : {}),
       });
     }
 
@@ -588,6 +675,7 @@ function normalizeSupportFile(skillName: string, file: SkillSupportFile): SkillS
     ...(file.trustPolicy
       ? { trustPolicy: normalizeSupportFileTrustPolicy(file.kind, file.trustPolicy) }
       : {}),
+    ...(file.script ? { script: normalizeSkillScriptMetadata(skillName, file.script) } : {}),
   };
 }
 
@@ -604,13 +692,32 @@ function normalizeSupportFileTrustPolicy(
   };
 }
 
-function createSupportFileTrustPolicy(kind: SkillSupportFileKind): SkillSupportFileTrustPolicy {
+function createSupportFileTrustPolicy(
+  kind: SkillSupportFileKind,
+  script?: SkillScriptMetadata,
+): SkillSupportFileTrustPolicy {
   if (kind === "script") {
+    if (script?.execute === true) {
+      return {
+        canRead: false,
+        canInject: false,
+        canExecute: true,
+        reason: "scripts default to execute=yes unless frontmatter declares execute: false; SkillSupportRuntime may read it only for deterministic execution",
+      };
+    }
+    if (script?.execute === false) {
+      return {
+        canRead: false,
+        canInject: false,
+        canExecute: false,
+        reason: "script frontmatter declares execute: false",
+      };
+    }
     return {
       canRead: false,
       canInject: false,
       canExecute: false,
-      reason: "scripts require SkillRuntime and ToolRuntime approval before they can be read or executed",
+      reason: "scripts require SkillSupportRuntime and ToolRuntime approval before they can be read or executed",
     };
   }
   return {
@@ -619,6 +726,86 @@ function createSupportFileTrustPolicy(kind: SkillSupportFileKind): SkillSupportF
     canExecute: false,
     reason: `${kind}s are trusted for read-only activation context when they stay inside the skill directory`,
   };
+}
+
+function normalizeSkillScriptMetadata(
+  skillName: string,
+  metadata: SkillScriptMetadata,
+): SkillScriptMetadata {
+  return {
+    ...(metadata.execute === undefined ? {} : { execute: Boolean(metadata.execute) }),
+    ...(metadata.sandbox === undefined ? {} : { sandbox: normalizeScriptSandbox(skillName, metadata.sandbox) }),
+    ...(metadata.interpreter === undefined ? {} : { interpreter: normalizeScriptInterpreter(skillName, metadata.interpreter) }),
+    ...(metadata.timeoutMs === undefined ? {} : { timeoutMs: normalizeNonNegativeInteger(`Skill.${skillName}.script.timeoutMs`, metadata.timeoutMs) }),
+    ...(metadata.outputLimitBytes === undefined ? {} : { outputLimitBytes: normalizeNonNegativeInteger(`Skill.${skillName}.script.outputLimitBytes`, metadata.outputLimitBytes) }),
+    ...(metadata.args === undefined ? {} : { args: normalizeScriptArgumentDefinitions(skillName, metadata.args) }),
+  };
+}
+
+function normalizeScriptArgumentDefinitions(
+  skillName: string,
+  args: readonly SkillScriptArgumentDefinition[],
+): readonly SkillScriptArgumentDefinition[] {
+  const seen = new Set<string>();
+  return args.map((arg, index) => {
+    const name = normalizeScriptArgumentName(`Skill.${skillName}.script.args[${index}].name`, arg.name);
+    if (seen.has(name)) {
+      throw new Error(`Skill.${skillName}.script.args contains duplicate argument: ${name}`);
+    }
+    seen.add(name);
+    return {
+      name,
+      type: normalizeScriptArgumentType(`Skill.${skillName}.script.args.${name}.type`, arg.type),
+      ...(arg.required === undefined ? {} : { required: Boolean(arg.required) }),
+      ...(arg.description === undefined ? {} : { description: normalizeSkillText(`Skill.${skillName}.script.args.${name}.description`, arg.description) }),
+    };
+  });
+}
+
+function normalizeScriptArgumentName(field: string, name: string): string {
+  const normalized = normalizeSkillText(field, name);
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(normalized)) {
+    throw new Error(`${field} must match [A-Za-z_][A-Za-z0-9_-]*.`);
+  }
+  return normalized;
+}
+
+function normalizeScriptArgumentType(field: string, type: string): SkillScriptArgumentType {
+  if (isSkillScriptArgumentType(type)) return type;
+  throw new Error(`${field} is invalid: ${type}`);
+}
+
+function isSkillScriptArgumentType(type: string): type is SkillScriptArgumentType {
+  return [
+    "string",
+    "number",
+    "boolean",
+    "string[]",
+    "number[]",
+    "boolean[]",
+    "json",
+  ].includes(type);
+}
+
+function normalizeScriptSandbox(skillName: string, sandbox: string): "virtual" | "local" {
+  if (sandbox !== "virtual" && sandbox !== "local") {
+    throw new Error(`Skill.${skillName}.script.sandbox is invalid: ${sandbox}`);
+  }
+  return sandbox;
+}
+
+function normalizeScriptInterpreter(skillName: string, interpreter: string): "bash" | "node" {
+  if (interpreter !== "bash" && interpreter !== "node") {
+    throw new Error(`Skill.${skillName}.script.interpreter is invalid: ${interpreter}`);
+  }
+  return interpreter;
+}
+
+function normalizeNonNegativeInteger(field: string, value: number): number {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative integer.`);
+  }
+  return value;
 }
 
 function normalizePriority(skillName: string, priority: number): number {
@@ -687,6 +874,209 @@ function normalizePath(path: string): string {
 
 function readErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readSkillScriptMetadata(
+  path: string,
+  diagnostics: SkillDiagnostic[],
+): SkillScriptMetadata | undefined {
+  const inferredMetadata = inferSkillScriptMetadata(path);
+  let content: string;
+  try {
+    content = readFileSync(path, "utf-8");
+  } catch (error) {
+    diagnostics.push({
+      type: "error",
+      code: "read-failed",
+      message: `Could not read skill script metadata: ${readErrorMessage(error)}`,
+      path,
+    });
+    return inferredMetadata;
+  }
+  const frontmatter = readScriptFrontmatter(content);
+  if (!frontmatter) return inferredMetadata;
+  const metadata: SkillScriptMetadata = { ...inferredMetadata };
+  for (const line of frontmatter.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const entry = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+    if (!entry?.[1]) {
+      diagnostics.push({
+        type: "error",
+        code: "invalid-frontmatter",
+        message: `Skill script frontmatter line is invalid: ${line.trim()}`,
+        path,
+      });
+      return undefined;
+    }
+    const key = entry[1];
+    const value = unquoteSkillValue(entry[2]?.trim() ?? "");
+    if (key === "execute" || key === "trust_execute") {
+      const booleanValue = parseSkillBoolean("Skill script execute", value, path, diagnostics);
+      if (booleanValue === undefined) return undefined;
+      metadata.execute = booleanValue;
+      continue;
+    }
+    if (key === "sandbox") {
+      if (value !== "virtual" && value !== "local") {
+        diagnostics.push({
+          type: "error",
+          code: "invalid-frontmatter",
+          message: `Skill script sandbox must be virtual or local: ${value}`,
+          path,
+        });
+        return undefined;
+      }
+      metadata.sandbox = value;
+      continue;
+    }
+    if (key === "interpreter") {
+      if (value !== "bash" && value !== "node") {
+        diagnostics.push({
+          type: "error",
+          code: "invalid-frontmatter",
+          message: `Skill script interpreter must be bash or node: ${value}`,
+          path,
+        });
+        return undefined;
+      }
+      metadata.interpreter = value;
+      continue;
+    }
+    if (key === "timeout_ms" || key === "timeoutMs") {
+      const timeoutMs = parseSkillNonNegativeInteger("Skill script timeout_ms", value, path, diagnostics);
+      if (timeoutMs === undefined) return undefined;
+      metadata.timeoutMs = timeoutMs;
+      continue;
+    }
+    if (key === "output_limit_bytes" || key === "outputLimitBytes") {
+      const outputLimitBytes = parseSkillNonNegativeInteger("Skill script output_limit_bytes", value, path, diagnostics);
+      if (outputLimitBytes === undefined) return undefined;
+      metadata.outputLimitBytes = outputLimitBytes;
+      continue;
+    }
+    if (key.startsWith("arg_")) {
+      const arg = parseSkillScriptArgumentDefinition(key.slice("arg_".length), value, path, diagnostics);
+      if (!arg) return undefined;
+      metadata.args = [...(metadata.args ?? []), arg];
+      continue;
+    }
+  }
+  return metadata;
+}
+
+function parseSkillScriptArgumentDefinition(
+  name: string,
+  value: string,
+  path: string,
+  diagnostics: SkillDiagnostic[],
+): SkillScriptArgumentDefinition | undefined {
+  const [rawType, rawRequired, ...descriptionParts] = value.split(/\s+/).filter(Boolean);
+  if (!rawType) {
+    diagnostics.push({
+      type: "error",
+      code: "invalid-frontmatter",
+      message: `Skill script arg_${name} must declare a type.`,
+      path,
+    });
+    return undefined;
+  }
+  const type = normalizeScriptArgumentTypeAlias(rawType);
+  if (!type) {
+    diagnostics.push({
+      type: "error",
+      code: "invalid-frontmatter",
+      message: `Skill script arg_${name} type is invalid: ${rawType}`,
+      path,
+    });
+    return undefined;
+  }
+  const required = rawRequired === "required"
+    ? true
+    : rawRequired === "optional"
+      ? false
+      : undefined;
+  const description = required === undefined
+    ? [rawRequired, ...descriptionParts].filter(Boolean).join(" ")
+    : descriptionParts.join(" ");
+  return {
+    name,
+    type,
+    ...(required === undefined ? {} : { required }),
+    ...(description ? { description: unquoteSkillValue(description) } : {}),
+  };
+}
+
+function normalizeScriptArgumentTypeAlias(type: string): SkillScriptArgumentType | undefined {
+  const normalized = type
+    .replace(/^array<(.+)>$/, "$1[]")
+    .replace("integer", "number")
+    .replace("bool", "boolean");
+  return isSkillScriptArgumentType(normalized) ? normalized : undefined;
+}
+
+function inferSkillScriptMetadata(path: string): SkillScriptMetadata | undefined {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".sh" || extension === ".bash") {
+    return {
+      execute: true,
+      sandbox: "virtual",
+      interpreter: "bash",
+      timeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
+      outputLimitBytes: DEFAULT_SCRIPT_OUTPUT_LIMIT_BYTES,
+    };
+  }
+  if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
+    return {
+      execute: true,
+      sandbox: "local",
+      interpreter: "node",
+      timeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
+      outputLimitBytes: DEFAULT_SCRIPT_OUTPUT_LIMIT_BYTES,
+    };
+  }
+  return undefined;
+}
+
+function readScriptFrontmatter(content: string): string | undefined {
+  const plain = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (plain) return plain[1] ?? "";
+  const blockComment = content.match(/^\/\*---\r?\n([\s\S]*?)\r?\n---\*\/(?:\r?\n|$)/);
+  if (blockComment) return blockComment[1] ?? "";
+  return undefined;
+}
+
+function parseSkillBoolean(
+  label: string,
+  value: string,
+  path: string,
+  diagnostics: SkillDiagnostic[],
+): boolean | undefined {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  diagnostics.push({
+    type: "error",
+    code: "invalid-frontmatter",
+    message: `${label} must be true or false: ${value}`,
+    path,
+  });
+  return undefined;
+}
+
+function parseSkillNonNegativeInteger(
+  label: string,
+  value: string,
+  path: string,
+  diagnostics: SkillDiagnostic[],
+): number | undefined {
+  const parsed = Number(value);
+  if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  diagnostics.push({
+    type: "error",
+    code: "invalid-frontmatter",
+    message: `${label} must be a non-negative integer: ${value}`,
+    path,
+  });
+  return undefined;
 }
 
 function statPath(

@@ -1,6 +1,10 @@
 import type {
   AgentExecutionOutcome,
   AgentRuntimeCommand,
+  SkillActivationDecision,
+  SkillCompositionDecision,
+  SkillSelectionReason,
+  SkillSupportFilePolicySnapshot,
 } from "../contracts.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import {
@@ -10,6 +14,7 @@ import {
 } from "./prompt-template.js";
 import {
   activateSkill,
+  resolveSkillSupportFileTrustPolicy,
   type SkillActivation,
   type SkillRegistry,
 } from "../skills/skill-loader.js";
@@ -32,7 +37,30 @@ export type InputMetadata = Record<string, unknown> & {
   selectedSkill?: string;
   promptTemplate?: RenderedPromptTemplate;
   skillActivation?: SkillActivation;
+  skillActivationAudit?: SkillActivationAudit;
+  skillCompositionAudit?: SkillCompositionAudit;
   args?: Record<string, unknown>;
+};
+
+export type SkillActivationAudit = {
+  skillName: string;
+  sourceLabel: string;
+  sourceScope: SkillSupportFilePolicySnapshot["sourceScope"];
+  decision: SkillActivationDecision;
+  selectionReason: SkillSelectionReason;
+  reason: string;
+  disableModelInvocation: boolean;
+  diagnosticCount: number;
+  supportFilePolicies: readonly SkillSupportFilePolicySnapshot[];
+};
+
+export type SkillCompositionAudit = {
+  requestedSkillNames: readonly string[];
+  knownSkillNames: readonly string[];
+  unknownSkillNames: readonly string[];
+  decision: SkillCompositionDecision;
+  selectionReason: SkillSelectionReason;
+  reason: string;
 };
 
 /**
@@ -43,7 +71,7 @@ export type InputMetadata = Record<string, unknown> & {
  */
 export type ProcessedInput =
   | { status: "ready"; command: AgentRuntimeCommand; metadata?: InputMetadata }
-  | { status: "rejected"; outcome: AgentExecutionOutcome }
+  | { status: "rejected"; outcome: AgentExecutionOutcome; metadata?: InputMetadata }
   | { status: "handled" };
 
 type RejectedInput = Extract<ProcessedInput, { status: "rejected" }>;
@@ -167,11 +195,51 @@ export class InputProcessor {
     if (!rawArgs) return metadata;
     const invocation = parseSkillUseInvocation(rawArgs);
     if (!invocation) return metadata;
+    if (invocation.kind === "composition") {
+      const knownSkillNames = invocation.names.filter((name) =>
+        registry.getDefinition(name) !== undefined
+      );
+      const knownSkillNameSet = new Set(knownSkillNames);
+      const unknownSkillNames = invocation.names.filter((name) =>
+        !knownSkillNameSet.has(name)
+      );
+      const audit = createSkillCompositionAudit({
+        requestedSkillNames: invocation.names,
+        knownSkillNames,
+        unknownSkillNames,
+      });
+      return {
+        status: "rejected",
+        outcome: {
+          status: "failed",
+          errorCode: "INPUT_REJECTED",
+          message: [
+            `Multiple skill activation is not supported yet: ${invocation.names.join(", ")}.`,
+            "Use one /skill use command per turn.",
+          ].join(" "),
+        },
+        metadata: mergeInputMetadata(metadata, {
+          inputMode: "skill",
+          skillCompositionAudit: audit,
+          args: {
+            ...metadata.args,
+            skillNames: invocation.names,
+            ...(knownSkillNames.length ? { knownSkillNames } : {}),
+            ...(unknownSkillNames.length ? { unknownSkillNames } : {}),
+          },
+        }),
+      };
+    }
     const skill = registry.getDefinition(invocation.name);
     if (!skill) {
       throw new Error(`Skill not found: ${invocation.name}`);
     }
     if (skill.disableModelInvocation) {
+      const audit = createSkillActivationAudit({
+        skill,
+        decision: "rejected",
+        reason: "Skill declares disable_model_invocation: true; use /skill run for deterministic script execution.",
+      });
       return {
         status: "rejected",
         outcome: {
@@ -179,19 +247,35 @@ export class InputProcessor {
           errorCode: "INPUT_REJECTED",
           message: [
             `Skill "${skill.name}" declares disable_model_invocation: true.`,
-            "It cannot be executed through prompt injection until SkillRuntime is available.",
+            "It cannot be executed through prompt injection; use /skill run for deterministic script execution.",
           ].join(" "),
         },
+        metadata: mergeInputMetadata(metadata, {
+          inputMode: "skill",
+          selectedSkill: skill.name,
+          skillActivationAudit: audit,
+          args: {
+            ...metadata.args,
+            skillName: skill.name,
+          },
+        }),
       };
     }
     const activation = activateSkill(skill, {
       ...(invocation.arguments ? { arguments: invocation.arguments } : {}),
       ...(Object.keys(invocation.variables).length ? { variables: invocation.variables } : {}),
     });
+    const audit = createSkillActivationAudit({
+      skill,
+      decision: "activated",
+      reason: "Skill activated by explicit /skill use command.",
+      diagnosticCount: activation.diagnostics?.length ?? 0,
+    });
     return mergeInputMetadata(metadata, {
       inputMode: "skill",
       selectedSkill: activation.name,
       skillActivation: activation,
+      skillActivationAudit: audit,
       args: {
         ...metadata.args,
         skillName: activation.name,
@@ -200,6 +284,52 @@ export class InputProcessor {
       },
     });
   }
+}
+
+function createSkillCompositionAudit(input: {
+  requestedSkillNames: readonly string[];
+  knownSkillNames: readonly string[];
+  unknownSkillNames: readonly string[];
+}): SkillCompositionAudit {
+  return {
+    requestedSkillNames: [...input.requestedSkillNames],
+    knownSkillNames: [...input.knownSkillNames],
+    unknownSkillNames: [...input.unknownSkillNames],
+    decision: "rejected",
+    selectionReason: "explicit_command",
+    reason: "Multiple skill activation is not supported yet; v1 allows one active skill per prompt turn.",
+  };
+}
+
+function createSkillActivationAudit(input: {
+  skill: NonNullable<ReturnType<SkillRegistry["getDefinition"]>>;
+  decision: SkillActivationDecision;
+  reason: string;
+  diagnosticCount?: number;
+}): SkillActivationAudit {
+  return {
+    skillName: input.skill.name,
+    sourceLabel: input.skill.sourceInfo.label,
+    sourceScope: input.skill.sourceInfo.scope,
+    decision: input.decision,
+    selectionReason: "explicit_command",
+    reason: input.reason,
+    disableModelInvocation: Boolean(input.skill.disableModelInvocation),
+    diagnosticCount: input.diagnosticCount ?? 0,
+    supportFilePolicies: input.skill.supportFiles.map((file) => {
+      const policy = resolveSkillSupportFileTrustPolicy(file);
+      return {
+        kind: file.kind,
+        label: file.label,
+        sourceLabel: file.sourceInfo.label,
+        sourceScope: file.sourceInfo.scope,
+        canRead: policy.canRead,
+        canInject: policy.canInject,
+        canExecute: policy.canExecute,
+        reason: policy.reason,
+      };
+    }),
+  };
 }
 
 function isRejectedInput(value: SkillActivationMetadataResult): value is RejectedInput {
@@ -261,20 +391,48 @@ function parseTemplateInvocation(rawArgs: string): {
   return { name, variables };
 }
 
-function parseSkillUseInvocation(rawArgs: string): {
-  name: string;
-  arguments?: string;
-  variables: Record<string, string>;
-} | undefined {
-  const match = rawArgs.match(/^use\s+([A-Za-z_][A-Za-z0-9_/-]*)(?:\s+([\s\S]*))?$/);
-  const name = match?.[1];
-  if (!name) return undefined;
+type SkillUseInvocation =
+  | {
+    kind: "single";
+    name: string;
+    arguments?: string;
+    variables: Record<string, string>;
+  }
+  | {
+    kind: "composition";
+    names: string[];
+  };
+
+function parseSkillUseInvocation(rawArgs: string): SkillUseInvocation | undefined {
+  const match = rawArgs.match(/^use\s+([^\s]+)(?:\s+([\s\S]*))?$/);
+  const rawName = match?.[1];
+  if (!rawName) return undefined;
+  const names = parseSkillCompositionNames(rawName);
+  if (names) {
+    return {
+      kind: "composition",
+      names,
+    };
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_/-]*$/.test(rawName)) return undefined;
   const parsedArguments = parseSkillUseArguments(match[2]?.trim() ?? "");
   return {
-    name,
+    kind: "single",
+    name: rawName,
     ...(parsedArguments.arguments ? { arguments: parsedArguments.arguments } : {}),
     variables: parsedArguments.variables,
   };
+}
+
+function parseSkillCompositionNames(rawName: string): string[] | undefined {
+  if (!/[,+]/.test(rawName)) return undefined;
+  const names = rawName
+    .split(/[,+]/)
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (names.length < 2) return undefined;
+  if (names.some((name) => !/^[A-Za-z_][A-Za-z0-9_/-]*$/.test(name))) return undefined;
+  return [...new Set(names)];
 }
 
 function parseSkillUseArguments(rawArgs: string): {

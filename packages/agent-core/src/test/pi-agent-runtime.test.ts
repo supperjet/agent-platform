@@ -233,13 +233,13 @@ test("runtime session renders prompt templates into transient context messages",
 });
 
 test("runtime session activates skills into transient context messages", async () => {
-  const registration = registerFauxProvider({ provider: "agent-core-skill-runtime-test" });
+  const registration = registerFauxProvider({ provider: "agent-core-skill-support-runtime-test" });
   registration.setResponses([
     fauxAssistantMessage(fauxText("Skill response."))
   ]);
   const runtime = new PiAgentRuntimeFactory({
     definition: formatAgentDefinition({
-      id: "skill-runtime-agent",
+      id: "skill-support-runtime-agent",
       model: registration.getModel(),
       instructions: ["Answer concisely in Chinese."],
       toolNames: []
@@ -250,13 +250,20 @@ test("runtime session activates skills into transient context messages", async (
         label: "Review",
         instructions: "Report findings first.",
         sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
-        supportFiles: [],
+        supportFiles: [{
+          kind: "script",
+          label: "review.sh",
+          path: "/tmp/review.sh",
+          sourceInfo: { source: "sdk", label: "scripts/review.sh", scope: "explicit" },
+        }],
         priority: 100,
         loadedAt: "2026-08-03T00:00:00.000Z",
       }),
     ]),
     resolveApiKey: () => "core-only-key"
-  }).create("session-skill-runtime");
+  }).create("session-skill-support-runtime");
+  const events: AgentRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
 
   try {
     const outcome = await runtime.execute({
@@ -277,6 +284,10 @@ test("runtime session activates skills into transient context messages", async (
           '<skill name="review" source="test">',
           "Report findings first.",
           "",
+          "<available_support_files>",
+          '<file kind="script" label="review.sh" source="scripts/review.sh" read="no" inject="no" execute="no" policy_reason="scripts require SkillSupportRuntime and ToolRuntime approval before they can be read or executed" />',
+          "</available_support_files>",
+          "",
           "<arguments>",
           "src/runtime.ts",
           "</arguments>",
@@ -296,12 +307,39 @@ test("runtime session activates skills into transient context messages", async (
         "Skill response.",
       ],
     );
+    assert.deepEqual(events.filter((event) => event.type === "skill_activation_decided"), [{
+      type: "skill_activation_decided",
+      sessionId: "session-skill-support-runtime",
+      skillName: "review",
+      sourceLabel: "test",
+      sourceScope: "explicit",
+      decision: "activated",
+      selectionReason: "explicit_command",
+      reason: "Skill activated by explicit /skill use command.",
+      disableModelInvocation: false,
+      diagnosticCount: 0,
+    }]);
+    assert.deepEqual(events.filter((event) => event.type === "skill_policy_checked"), [{
+      type: "skill_policy_checked",
+      sessionId: "session-skill-support-runtime",
+      skillName: "review",
+      policy: {
+        kind: "script",
+        label: "review.sh",
+        sourceLabel: "scripts/review.sh",
+        sourceScope: "explicit",
+        canRead: false,
+        canInject: false,
+        canExecute: false,
+        reason: "scripts require SkillSupportRuntime and ToolRuntime approval before they can be read or executed",
+      },
+    }]);
   } finally {
     registration.unregister();
   }
 });
 
-test("runtime session rejects model-disabled skills until SkillRuntime exists", async () => {
+test("runtime session rejects model-disabled skills through prompt activation", async () => {
   const registration = registerFauxProvider({ provider: "agent-core-disabled-skill-test" });
   const runtime = new PiAgentRuntimeFactory({
     definition: formatAgentDefinition({
@@ -324,6 +362,8 @@ test("runtime session rejects model-disabled skills until SkillRuntime exists", 
     ]),
     resolveApiKey: () => "core-only-key"
   }).create("session-disabled-skill");
+  const events: AgentRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
 
   try {
     const outcome = await runtime.execute({
@@ -336,11 +376,88 @@ test("runtime session rejects model-disabled skills until SkillRuntime exists", 
       errorCode: "INPUT_REJECTED",
       message: [
         'Skill "export-snapshot" declares disable_model_invocation: true.',
-        "It cannot be executed through prompt injection until SkillRuntime is available.",
+        "It cannot be executed through prompt injection; use /skill run for deterministic script execution.",
       ].join(" "),
     });
     assert.equal(runtime.inspectContext(), undefined);
     assert.deepEqual(runtime.exportState().payload.entries, []);
+    assert.deepEqual(events, [{
+      type: "skill_activation_decided",
+      sessionId: "session-disabled-skill",
+      skillName: "export-snapshot",
+      sourceLabel: "test",
+      sourceScope: "explicit",
+      decision: "rejected",
+      selectionReason: "explicit_command",
+      reason: "Skill declares disable_model_invocation: true; use /skill run for deterministic script execution.",
+      disableModelInvocation: true,
+      diagnosticCount: 0,
+    }]);
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("runtime session rejects multi-skill composition with audit events", async () => {
+  const registration = registerFauxProvider({ provider: "agent-core-skill-composition-test" });
+  const runtime = new PiAgentRuntimeFactory({
+    definition: formatAgentDefinition({
+      id: "skill-composition-agent",
+      model: registration.getModel(),
+      instructions: ["Answer concisely in Chinese."],
+      toolNames: []
+    }),
+    skillRegistry: createSkillRegistry([
+      defineSkill({
+        name: "review",
+        label: "Review",
+        instructions: "Review code.",
+        sourceInfo: { source: "sdk", label: "review-test", scope: "explicit" },
+        supportFiles: [],
+        priority: 100,
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      }),
+      defineSkill({
+        name: "lint",
+        label: "Lint",
+        instructions: "Lint code.",
+        sourceInfo: { source: "sdk", label: "lint-test", scope: "explicit" },
+        supportFiles: [],
+        priority: 100,
+        loadedAt: "2026-08-03T00:00:00.000Z",
+      }),
+    ]),
+    resolveApiKey: () => "core-only-key"
+  }).create("session-skill-composition");
+  const events: AgentRuntimeEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+
+  try {
+    const outcome = await runtime.execute({
+      type: "prompt",
+      text: "/skill use review+lint target=src",
+    });
+
+    assert.deepEqual(outcome, {
+      status: "failed",
+      errorCode: "INPUT_REJECTED",
+      message: [
+        "Multiple skill activation is not supported yet: review, lint.",
+        "Use one /skill use command per turn.",
+      ].join(" "),
+    });
+    assert.equal(runtime.inspectContext(), undefined);
+    assert.deepEqual(runtime.exportState().payload.entries, []);
+    assert.deepEqual(events, [{
+      type: "skill_composition_decided",
+      sessionId: "session-skill-composition",
+      requestedSkillNames: ["review", "lint"],
+      knownSkillNames: ["review", "lint"],
+      unknownSkillNames: [],
+      decision: "rejected",
+      selectionReason: "explicit_command",
+      reason: "Multiple skill activation is not supported yet; v1 allows one active skill per prompt turn.",
+    }]);
   } finally {
     registration.unregister();
   }
@@ -2030,6 +2147,18 @@ test("rejects duplicate tool registrations", () => {
   assert.throws(
     () => createAgentToolRegistry([inspectDefinitionTool, inspectDefinitionTool]),
     /duplicate tool name: inspect_definition/
+  );
+});
+
+test("rejects provider-incompatible tool names", () => {
+  const inspectDefinitionTool = {
+    ...createInspectDefinitionTool(),
+    name: "skill.run_script",
+  };
+
+  assert.throws(
+    () => createAgentToolRegistry([inspectDefinitionTool]),
+    /must match \^\[a-zA-Z0-9_-\]\+\$: skill\.run_script/,
   );
 });
 

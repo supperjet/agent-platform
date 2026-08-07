@@ -3,7 +3,12 @@ import type { AgentRuntimeCommand } from "../contracts.js";
 import type { LifecycleRunner } from "../lifecycle/lifecycle-runner.js";
 import type { RenderedPromptTemplate } from "../prompt/prompt-template.js";
 import { createUserMessage } from "../runtime/messages.js";
-import type { SkillActivation } from "../skills/skill-loader.js";
+import type { SkillActivation, SkillScriptArgumentDefinition } from "../skills/skill-loader.js";
+import {
+  SKILL_READ_SUPPORT_FILE_TOOL_NAME,
+  SKILL_RENDER_TEMPLATE_TOOL_NAME,
+  SKILL_RUN_SCRIPT_TOOL_NAME,
+} from "../skills/skill-tools.js";
 import { ContextBudget, type ContextBudgetEstimate } from "./context-budget.js";
 
 export type PromptRuntimeCommand = Extract<AgentRuntimeCommand, { type: "prompt" }>;
@@ -20,6 +25,8 @@ export type ContextAssemblerInput = {
 };
 
 export type TurnContextMetadata = {
+  /** InputProcessor 与 lifecycle 合并后的本轮元数据，供后续 per-turn resolver 使用。 */
+  turn?: Record<string, unknown>;
   /** beforeRun / beforeContext hook 写入的运行期元数据。 */
   hooks?: Record<string, unknown>;
   /** 上下文预算估算结果，只用于观测，不做裁剪。 */
@@ -159,6 +166,7 @@ export class ContextAssembler {
       conversationMessageCount: input.conversationMessages.length,
       messages: contextMessages,
       metadata: {
+        ...(hookMetadata ? { turn: hookMetadata } : {}),
         ...(hookMetadata ? { hooks: hookMetadata } : {}),
         budget,
         diagnostics: {
@@ -250,6 +258,24 @@ function createSkillMessage(
   return createUserMessage([
     `<skill name="${escapeXmlAttribute(activation.name)}" source="${escapeXmlAttribute(activation.sourceInfo.label)}">`,
     activation.instructions,
+    ...(activation.supportFiles?.length
+      ? [
+          "",
+          "<available_support_files>",
+          ...activation.supportFiles.flatMap((file) => [
+            createSupportFileManifestLine(file),
+            ...(file.template
+              ? [createTemplateContractLine(file.template)]
+              : []),
+            ...(file.script?.args?.length
+              ? file.script.args.map(createScriptArgumentContractLine)
+              : []),
+            ...(file.template || file.script?.args?.length ? [`</file>`] : []),
+          ]),
+          "</available_support_files>",
+          ...createSupportFileToolsBlock(activation.supportFiles),
+        ]
+      : []),
     ...(activation.references?.length
       ? [
           "",
@@ -296,6 +322,28 @@ function createSkillMessage(
   ].join("\n"));
 }
 
+function createSupportFileToolsBlock(
+  supportFiles: readonly NonNullable<SkillActivation["supportFiles"]>[number][],
+): string[] {
+  const tools: string[] = [];
+  if (supportFiles.some((file) => file.trustPolicy.canRead)) {
+    tools.push(`<tool name="${SKILL_READ_SUPPORT_FILE_TOOL_NAME}" action="read" />`);
+  }
+  if (supportFiles.some((file) => file.kind === "template" && file.trustPolicy.canRead)) {
+    tools.push(`<tool name="${SKILL_RENDER_TEMPLATE_TOOL_NAME}" action="render" />`);
+  }
+  if (supportFiles.some((file) => file.kind === "script" && file.trustPolicy.canExecute)) {
+    tools.push(`<tool name="${SKILL_RUN_SCRIPT_TOOL_NAME}" action="run" />`);
+  }
+  if (tools.length === 0) return [];
+  return [
+    "",
+    "<support_file_tools>",
+    ...tools,
+    "</support_file_tools>",
+  ];
+}
+
 function readSkillActivation(
   metadata: Record<string, unknown> | undefined,
 ): SkillActivation | undefined {
@@ -305,10 +353,59 @@ function readSkillActivation(
   if (typeof activation.name !== "string" || typeof activation.instructions !== "string") return undefined;
   if (!activation.sourceInfo || typeof activation.sourceInfo.label !== "string") return undefined;
   if (activation.arguments !== undefined && typeof activation.arguments !== "string") return undefined;
+  if (activation.supportFiles !== undefined && !Array.isArray(activation.supportFiles)) return undefined;
   if (activation.references !== undefined && !Array.isArray(activation.references)) return undefined;
   if (activation.templates !== undefined && !Array.isArray(activation.templates)) return undefined;
   if (activation.diagnostics !== undefined && !Array.isArray(activation.diagnostics)) return undefined;
   return activation as SkillActivation;
+}
+
+function createSupportFileManifestLine(
+  file: NonNullable<SkillActivation["supportFiles"]>[number],
+): string {
+  const attributes = [
+    `kind="${escapeXmlAttribute(file.kind)}"`,
+    `label="${escapeXmlAttribute(file.label)}"`,
+    `source="${escapeXmlAttribute(file.sourceInfo.label)}"`,
+    `read="${formatPolicyBoolean(file.trustPolicy.canRead)}"`,
+    `inject="${formatPolicyBoolean(file.trustPolicy.canInject)}"`,
+    `execute="${formatPolicyBoolean(file.trustPolicy.canExecute)}"`,
+    `policy_reason="${escapeXmlAttribute(file.trustPolicy.reason)}"`,
+    ...(file.script?.sandbox ? [`sandbox="${escapeXmlAttribute(file.script.sandbox)}"`] : []),
+    ...(file.script?.interpreter ? [`interpreter="${escapeXmlAttribute(file.script.interpreter)}"`] : []),
+    ...(file.script?.timeoutMs === undefined ? [] : [`timeout_ms="${file.script.timeoutMs}"`]),
+    ...(file.script?.outputLimitBytes === undefined ? [] : [`output_limit_bytes="${file.script.outputLimitBytes}"`]),
+  ];
+  if (file.template || file.script?.args?.length) return `<file ${attributes.join(" ")}>`;
+  return `<file ${attributes.join(" ")} />`;
+}
+
+function createTemplateContractLine(
+  template: NonNullable<NonNullable<SkillActivation["supportFiles"]>[number]["template"]>,
+): string {
+  const variables = template.variableDefinitions?.map((variable) => variable.name).join(",") ?? "";
+  const attributes = [
+    `name="${escapeXmlAttribute(template.name)}"`,
+    ...(template.description ? [`description="${escapeXmlAttribute(template.description)}"`] : []),
+    ...(variables ? [`variables="${escapeXmlAttribute(variables)}"`] : []),
+  ];
+  return `<template_contract ${attributes.join(" ")} />`;
+}
+
+function createScriptArgumentContractLine(
+  arg: SkillScriptArgumentDefinition,
+): string {
+  const attributes = [
+    `name="${escapeXmlAttribute(arg.name)}"`,
+    `type="${escapeXmlAttribute(arg.type)}"`,
+    `required="${formatPolicyBoolean(Boolean(arg.required))}"`,
+    ...(arg.description ? [`description="${escapeXmlAttribute(arg.description)}"`] : []),
+  ];
+  return `<arg ${attributes.join(" ")} />`;
+}
+
+function formatPolicyBoolean(value: boolean): "yes" | "no" {
+  return value ? "yes" : "no";
 }
 
 function readRenderedTemplate(

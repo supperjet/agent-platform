@@ -56,7 +56,99 @@ Review {{target}} with focus {{focus}}.
 
 模板仍然不会进入 base system prompt。执行 `/template review target=src focus=tests` 时，渲染结果会作为本轮 transient user message 合并进 messages；原始 `/template ...` 输入仍作为可持久化用户消息写回 conversation。
 
-Skill 使用 `agent/skills/**/SKILL.md` 目录能力包约定。V1 发现 metadata、正文 instructions 和 `references/`、`templates/`、`scripts/` 支持文件清单；显式执行 `/skill <name>` 查看详情时才读取允许读取的支持文件内容，显式执行 `/skill use <name> ...` 时会把 skill instructions、存在的 `references/` 内容，以及用 `key=value` 渲染后的 skill 内 `templates/` 作为本轮 transient context 注入。`scripts/` 只登记清单，不读取、不注入、不执行；support symlink 会被 trust policy 拒绝并返回 diagnostics。启动时会向 stderr 打印 SkillLoader diagnostics，`/skills` 会展示 loader diagnostics，`/skill <name>` 会展示支持文件 trust policy 和读取 diagnostics。不会自动选择 skill：
+Skill 使用 `agent/skills/**/SKILL.md` 目录能力包约定。V1 发现 metadata、正文 instructions 和 `references/`、`templates/`、`scripts/` 支持文件清单；显式执行 `/skill <name>` 查看详情时才读取允许读取的支持文件内容，显式执行 `/skill use <name> ...` 时会把 skill instructions、支持文件 manifest、存在的 `references/` 内容，以及用 `key=value` 渲染后的 skill 内 `templates/` 作为本轮 transient context 注入。manifest 只包含 kind、label、source、runtime policy、template 变量契约和 script metadata，不代表文件已读取或脚本已执行。`scripts/` 不会被 prompt 激活读取或注入；通过 `/skill run <skill> <script> ...` 或模型工具 `skill_run_script` 进入 skill runtime 时，支持的脚本默认可执行，只有脚本 metadata 显式声明 `execute: false` 才关闭执行。support symlink 会被 loader 的 trust policy 拒绝并返回 diagnostics。启动时会向 stderr 打印 SkillLoader diagnostics，`/skills` 会展示 loader diagnostics，`/skill <name>` 会展示支持文件的 runtime policy 和读取 diagnostics。不会自动选择 skill：
+
+显式 `/skill use` 会发布可审计 runtime events：`skill_activation_decided`
+记录激活或拒绝原因，`skill_policy_checked` 记录每个支持文件的 read / inject /
+execute 运行期策略。CLI 的 `/events` 可以观察实时事件，`/eventlog [runId]`
+可以查看保存在 EventStore 里的同一批记录。
+
+显式 `/skill run` 不调用模型，也不注入 prompt。脚本 metadata 可以省略；默认值按文件后缀推断：
+
+- `.sh` / `.bash`：`interpreter: bash`，`sandbox: virtual`
+- `.js` / `.mjs` / `.cjs`：`interpreter: node`，`sandbox: local`
+- `timeout_ms`：`5000`
+- `output_limit_bytes`：`1048576`
+
+需要覆盖默认值时，可以使用脚本文件顶部 frontmatter；`.js` 文件应使用注释
+frontmatter，保证文件本身仍是合法 JavaScript：
+
+```sh
+---
+sandbox: virtual
+timeout_ms: 1000
+output_limit_bytes: 65536
+---
+echo "$SKILL_ARGS_JSON"
+```
+
+```js
+/*---
+sandbox: local
+interpreter: node
+timeout_ms: 1000
+output_limit_bytes: 65536
+---*/
+const args = JSON.parse(process.env.SKILL_ARGS_JSON ?? "[]");
+console.log(args);
+```
+
+脚本可以声明第一版参数契约，格式是 `arg_<name>: <type> required|optional <description>`。
+支持的类型包括 `string`、`number`、`boolean`、`string[]`、`number[]`、`boolean[]`
+和 `json`：
+
+```js
+/*---
+sandbox: local
+arg_numbers: number[] required Numbers to sum
+---*/
+const input = JSON.parse(process.env.SKILL_INPUT_JSON ?? "{}");
+const numbers = input.namedArgs.numbers;
+console.log(JSON.stringify({ status: "ok", result: { sum: numbers.reduce((a, b) => a + b, 0) } }));
+```
+
+`/skill run math sum numbers=1,2,3` 和模型工具 `skill_run_script` 的 `namedArgs`
+都会先按契约校验 / 转换，再注入 `SKILL_NAMED_ARGS_JSON` 和 `SKILL_INPUT_JSON`。
+脚本 stdout 最后一行如果是 JSON envelope（或带 `SKILL_RESULT_JSON:` 前缀），runtime
+会解析为结构化输出。推荐 envelope：
+
+```json
+{ "status": "ok", "result": { "sum": 6 }, "logs": ["parsed 3 numbers"] }
+```
+
+exit code `0` 会归类为 `succeeded`，`2` 会归类为 `invalid_arguments`，超时归类为
+`timed_out`，其余非零退出归类为 `failed`。
+
+要显式禁止某个脚本执行，可以写 `execute: false`。local 执行必须来自脚本 metadata
+或文件后缀推断出的 `sandbox: local`，且 `LocalProcessSandbox` 只继承 allowlist
+env；用户参数通过 `SKILL_ARGS`、`SKILL_ARGS_JSON`、`SKILL_NAMED_ARGS_JSON` 和
+`SKILL_INPUT_JSON` 传入脚本。SkillSupportRuntime 会发布
+`skill_script_policy_checked`、`skill_script_started`、
+`skill_script_completed` 和 `skill_script_failed` 审计事件。
+
+Skill support file 的按需契约入口已接入第一版 CLI 调试路径和模型工具路径：
+
+- `/skill read <skill> <file>`：通过 `SkillSupportRuntime` 读取一个 policy
+  允许 read 的支持文件。`scripts/` 因为 `read=no` 会被拒绝。
+- `/skill render <skill> <template> key=value...`：通过 `SkillSupportRuntime`
+  渲染一个 policy 允许 read 的 skill template，并复用 prompt-template 的变量校验。
+- `/skill run <skill> <script> ...`：通过 `SkillSupportRuntime.runScript()` 执行一个 policy 允许
+  execute 的 script。
+- `skill_read_support_file` / `skill_render_template` / `skill_run_script`：作为通用
+  skill tools 注册到 ToolRegistry，但 CLI 的普通 `/tools` 开关不直接启用它们；
+  每个 prompt turn 会根据 active skill manifest 动态暴露本轮需要的 read / render /
+  run tool schema。执行时仍会检查当前 prompt turn 是否激活了对应 skill，再复用同一套
+  read / render / run policy。
+
+这三组入口对应 manifest 中的可发现契约。CLI 入口用于人工调试；模型工具入口的返回值作为
+tool result 回到同一轮模型上下文，由模型继续决定如何回答。当前实现是“静态 registry +
+per-turn tools override”：ToolRegistry 仍是启动时仓库，真正暴露给模型的本轮 tools
+由 RuntimeAssembler / TurnRunner 在 context 装配后根据 active skill 动态解析。
+
+当前每个 prompt turn 只允许一个 active skill。显式组合写法如
+`/skill use review,lint ...` 或 `/skill use review+lint ...` 会在 prompt 注入前
+返回 `INPUT_REJECTED`，并发布 `skill_composition_decided` 审计事件。普通
+`/skill use review src/file` 仍把 `src/file` 作为 skill arguments。
 
 ```md
 ---
@@ -72,8 +164,7 @@ Report findings first, ordered by severity.
 
 `disable-model-invocation` 也会作为兼容别名解析，但 CLI 展示统一使用
 `disable_model_invocation`。声明 `disable_model_invocation: true` 的 skill 不会通过
-prompt 注入执行；在 SkillRuntime 接入前，显式 `/skill use <name>` 会返回
-`INPUT_REJECTED` 诊断，避免误触发模型调用。
+prompt 注入执行；需要执行确定性脚本时使用 `/skill run`。
 
 Loader 和 registry 的职责是分离的：
 
@@ -100,6 +191,14 @@ Loader 和 registry 的职责是分离的：
 /skill review          打印某个 skill 的 instructions、支持文件清单和支持文件内容。
 /skill use review src target=src
                        激活某个 skill，并把 instructions、references/ 和渲染后的 templates/ 注入本轮临时上下文。
+/skill use review,lint target=src
+                       当前会拒绝多 skill 组合，并记录 skill_composition_decided 审计事件。
+/skill read review checklist.md
+                       读取一个 policy 允许 read 的 skill support file。
+/skill render review finding target=src
+                       渲染一个 policy 允许 read 的 skill template。
+/skill run review collect arg
+                       执行一个 policy 允许 execute 的 skill script。
 /policy on|off         切换默认 ToolPolicy。
 /approve ask|always|never  设置审批策略。
 /events on|off|json    切换 AgentRuntime 和 ToolRuntime 事件打印。

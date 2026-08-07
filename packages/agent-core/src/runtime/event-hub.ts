@@ -67,6 +67,11 @@ export class EventHub {
     for (const listener of this.listeners) listener(runtimeEvent);
   }
 
+  /** 发布已经归一化的 runtime 诊断事件。 */
+  publishRuntimeEvent(event: AgentRuntimeEvent) {
+    for (const listener of this.listeners) listener(event);
+  }
+
   /** 发布 session-level abort terminal 事件。 */
   publishRunAborted() {
     const runtimeEvent: AgentRuntimeEvent = {

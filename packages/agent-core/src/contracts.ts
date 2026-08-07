@@ -8,6 +8,7 @@ export type AgentModel = Model<any>;
 
 export type AgentRuntimeCommand =
   | { type: "prompt"; text: string }
+  | { type: "skill_run"; skillName: string; scriptName: string; args?: readonly string[]; namedArgs?: Record<string, unknown> }
   | { type: "steer"; text: string }
   | { type: "follow-up"; text: string }
   | { type: "compact"; reason?: "manual"; keepLastMessages?: number }
@@ -54,6 +55,19 @@ export type AgentExecutionOutcome =
 
 export type AgentMessageRole = "user" | "assistant" | "toolResult";
 export type AgentRuntimeMessageScope = "persistent" | "transient" | "unknown";
+export type SkillActivationDecision = "activated" | "rejected";
+export type SkillSelectionReason = "explicit_command" | "automatic";
+export type SkillSupportFilePolicySnapshot = {
+  kind: "reference" | "template" | "script";
+  label: string;
+  sourceLabel: string;
+  sourceScope: "global" | "project" | "workspace" | "explicit";
+  canRead: boolean;
+  canInject: boolean;
+  canExecute: boolean;
+  reason: string;
+};
+export type SkillCompositionDecision = "rejected";
 
 export type AgentRuntimeEvent =
   | { type: "run_started"; sessionId: string }
@@ -69,7 +83,14 @@ export type AgentRuntimeEvent =
   | { type: "tool_approval_approved"; sessionId: string; toolCallId: string; toolName: string }
   | { type: "tool_approval_denied"; sessionId: string; toolCallId: string; toolName: string; reason: string }
   | { type: "tool_progress"; sessionId: string; toolCallId: string; text: string }
-  | { type: "tool_finished"; sessionId: string; toolCallId: string; isError: boolean; text: string; sourceIds: string[] };
+  | { type: "tool_finished"; sessionId: string; toolCallId: string; isError: boolean; text: string; sourceIds: string[] }
+  | { type: "skill_activation_decided"; sessionId: string; skillName: string; sourceLabel: string; sourceScope: SkillSupportFilePolicySnapshot["sourceScope"]; decision: SkillActivationDecision; selectionReason: SkillSelectionReason; reason: string; disableModelInvocation: boolean; diagnosticCount: number }
+  | { type: "skill_policy_checked"; sessionId: string; skillName: string; policy: SkillSupportFilePolicySnapshot }
+  | { type: "skill_composition_decided"; sessionId: string; requestedSkillNames: string[]; knownSkillNames: string[]; unknownSkillNames: string[]; decision: SkillCompositionDecision; selectionReason: SkillSelectionReason; reason: string }
+  | { type: "skill_script_policy_checked"; sessionId: string; skillName: string; scriptName: string; sourceLabel: string; sourceScope: SkillSupportFilePolicySnapshot["sourceScope"]; sandboxKind: "virtual" | "local"; canExecute: boolean; reason: string }
+  | { type: "skill_script_started"; sessionId: string; skillName: string; scriptName: string; sourceLabel: string; sandboxKind: "virtual" | "local"; cwd: string; timeoutMs: number }
+  | { type: "skill_script_completed"; sessionId: string; skillName: string; scriptName: string; sandboxKind: "virtual" | "local"; exitCode: number | null; outcome: "succeeded" | "invalid_arguments" | "failed" | "timed_out"; durationMs: number; timedOut: boolean; truncated: boolean; stdoutPreview: string; stderrPreview: string }
+  | { type: "skill_script_failed"; sessionId: string; skillName: string; scriptName: string; sandboxKind?: "virtual" | "local"; errorCode: "SCRIPT_REJECTED" | "SCRIPT_NOT_FOUND" | "SCRIPT_INVALID_ARGUMENTS" | "SCRIPT_EXECUTION_FAILED"; message: string; policyRejected: boolean };
 
 export type AgentRuntimeEventListener = (event: AgentRuntimeEvent) => void;
 

@@ -13,6 +13,9 @@ import {
   SkillLoader,
   type SkillDiagnostic,
   ToolsLoader,
+  createActiveSkillTracker,
+  createAgentToolRegistry,
+  createSkillToolDefinitions,
   getDeepSeekModel,
 } from "../../index.js";
 
@@ -24,16 +27,29 @@ async function main() {
   const workingDirectory = process.cwd();
   const resourceRegistry = new ResourceLoader({ agentDir }).createRegistry();
   const promptTemplateRegistry = new PromptTemplateLoader({ agentDir }).createRegistry();
+  const toolRegistry = await new ToolsLoader({ agentDir, workingDirectory }).createRegistry();
   const skillSnapshot = new SkillLoader({ agentDir }).load();
+
   if (skillSnapshot.diagnostics.length) {
     stderr.write(formatSkillDiagnosticsForStderr(skillSnapshot.diagnostics));
   }
   const skillError = skillSnapshot.diagnostics.find((diagnostic) => diagnostic.type === "error");
+
   if (skillError) {
     throw new Error(`SkillLoader failed: ${skillError.message}`);
   }
+  
   const skillRegistry = createSkillRegistry(skillSnapshot.skills);
-  const toolRegistry = await new ToolsLoader({ agentDir, workingDirectory }).createRegistry();
+  const activeSkills = createActiveSkillTracker();
+  const registryWithSkillTools = createAgentToolRegistry([
+    ...toolRegistry.getAllEntries().map((entry) => entry.definition),
+    ...createSkillToolDefinitions({
+      registry: skillRegistry,
+      workingDirectory,
+      activeSkills,
+    }),
+  ]);
+
   // 获取模型
   const model = getDeepSeekModel();
 
@@ -43,7 +59,8 @@ async function main() {
     promptTemplateRegistry,
     skillRegistry,
     skillDiagnostics: skillSnapshot.diagnostics,
-    toolRegistry,
+    toolRegistry: registryWithSkillTools,
+    activeSkills,
     workingDirectory,
     resolveApiKey: (provider) => provider === "deepseek"
       ? process.env.DEEPSEEK_API_KEY

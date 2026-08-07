@@ -1713,8 +1713,8 @@ disable_model_invocation: true
 - `description`：用于 `/skills` 展示和未来模型选择提示。它应该说明何时使用
   这个 skill，而不只是复述名称。
 - `disable_model_invocation`：声明该 skill 不能通过 prompt 注入触发模型回答。
-  在 SkillRuntime 出现前，显式 `/skill use` 会被 runtime 拒绝并返回诊断；
-  后续 SkillRuntime 负责把它接到本地处理、纯查看或纯工具编排路径。
+  在 SkillSupportRuntime 出现前，显式 `/skill use` 会被 runtime 拒绝并返回诊断；
+  后续 SkillSupportRuntime 负责把它接到本地处理、纯查看或纯工具编排路径。
 
 工作项：
 
@@ -1835,9 +1835,11 @@ Skill activation 建议分四步推进：
    `templates/` 或 `scripts/`，也不写入长期 conversation state。skill 内
    `templates/` 已接入第一版渲染：`/skill use <name> key=value ...` 中的
    `key=value` 会作为模板变量，缺失变量进入 activation diagnostics。
-4. **SkillRuntime / scripts 执行**：仅在出现确定性流程或必须程序执行脚本的需求
-   后再做。执行应复用已有 tools / ToolRuntime / policy / approval，skill 只做
-   编排描述，不另造一套执行器。
+4. **SkillSupportRuntime / scripts 执行**：仅在 Sandbox 阶段完成后再做。执行应复用
+   统一 `Sandbox` seam：ToolRuntime 和 SkillSupportRuntime 分别把工具调用、skill
+   script 调用翻译成 sandbox request；sandbox adapter 负责 local / virtual /
+   future remote/container 的具体执行。skill 只做编排描述，不另造一套执行器或
+   治理面。
 
 Skill activation v1 之后仍欠缺的能力，先按以下顺序排进后续计划：
 
@@ -1850,29 +1852,60 @@ Skill activation v1 之后仍欠缺的能力，先按以下顺序排进后续计
    读取失败的 UI 诊断和 public event 审计。
 4. **skill 内 templates 渲染**：已接入第一版。后续需要补模板选择、模板级
    diagnostics 展示、变量说明展示，以及更细粒度的按需展开策略。
+4a. **支持文件 manifest 注入**：已接入第一版。显式 `/skill use` 激活后，模型
+   不只看到 instructions 和已展开内容，还会看到 `<available_support_files>` 清单，
+   包含每个 support file 的 kind、label、source、read / inject / execute policy、
+   template 变量契约和 script metadata。manifest 是可发现契约，不代表文件已经读取、
+   模板已经渲染或脚本已经执行；真正的 read / render / run 由 runtime contract
+   和模型工具入口单独触发。
+4b. **支持文件 read / render / run 契约入口**：已接入第一版。`SkillSupportRuntime`
+   提供 `read()`、`renderTemplate()` 和 `runScript()` 三个稳定入口，统一复用
+   support file policy：`read=no` 的 script 会被拒绝，template 渲染复用
+   prompt-template 变量校验，script 执行复用 Sandbox 和 script trust policy。
+   CLI 增加 `/skill read <skill> <file>` 和
+   `/skill render <skill> <template> key=value...` 作为调试入口；`/skill run`
+   也走同一个 facade。模型工具层已注册 `skill_read_support_file`、
+   `skill_render_template` 和 `skill_run_script` 三个通用工具。当前实现不动态重建
+   ToolRegistry，而是保持启动时静态 registry，并在每个 prompt turn context 装配后
+   通过 tools override 动态暴露本轮可用的 skill tools；执行时继续用当前 active
+   skill holder 和 policy 做强校验。CLI 调试入口不自动回灌 prompt；模型工具入口的
+   返回值作为 tool result 回到同一轮模型上下文。
 5. **`disable_model_invocation` 策略生效**：已接入第一版。该字段从展示
    metadata 推进到输入运行策略：声明为 `true` 的 skill 不再进入 prompt 注入 /
    模型调用路径，显式 `/skill use` 会返回 `INPUT_REJECTED`，提示需要后续
-   SkillRuntime 才能执行。本地处理、纯查看或纯工具编排路径仍留给后续
-   SkillRuntime 实现。
-6. **支持文件 trust policy**：已接入第一版。`SkillSupportFile` 带只读
-   trust policy；`references/` 和 `templates/` 在留在 skill 目录内时允许读取 /
-   注入，`scripts/` 只登记清单，不读取、不注入、不执行。support symlink 会被
-   拒绝并返回 `trust-policy-denied` diagnostics。后续还需要把这些 policy
-   decision 接入 public event / run log 审计，并在 SkillRuntime 阶段复用
-   tools / ToolRuntime / approval。
+   SkillSupportRuntime 才能执行。本地处理、纯查看或纯工具编排路径仍留给后续
+   SkillSupportRuntime 实现。
+6. **支持文件 trust policy**：已接入第一版。`SkillSupportFile` 带 loader 计算出
+   的只读 runtime policy；`references/` 和 `templates/` 在留在 skill 目录内时
+   允许读取 / 注入，`scripts/` 只登记清单，不读取、不注入、不执行。support
+   symlink 会被拒绝并返回 `trust-policy-denied` diagnostics。显式 skill 激活时
+   support file policy decision 会进入 `skill_policy_checked` public event /
+   run log 审计；后续 SkillSupportRuntime 阶段应继续复用 tools / ToolRuntime /
+   approval。
 7. **诊断可视化**：已接入第一版。CLI 入口会先通过 `SkillLoader.load()`
    保留 diagnostics，启动时向 stderr 打印 SkillLoader diagnostics；`/skills`
-   会展示 loader diagnostics，`/skill <name>` 会展示支持文件 trust policy 和读取
-   diagnostics。后续还需要把自动选择理由、activation decision 和 policy decision
-   接入 public event / run log 审计。
-8. **激活事件与审计日志**：为 public event / run log 增加稳定的
-   `skill_activated` 或等价记录，包含 skill name、source、触发方式和是否展开
-   支持文件。
-9. **组合使用与冲突处理**：定义多 skill 激活、优先级、互斥、顺序和预算规则。
-   第一版可以只允许单 skill，并对多命中给出诊断。
+   会展示 loader diagnostics，`/skill <name>` 会展示支持文件 runtime policy 和
+   读取 diagnostics。显式 `/skill use` 会发布 `skill_activation_decided` 和
+   `skill_policy_checked` runtime events，CLI `/eventlog`、server public event
+   history 和 SSE 投影都会保留这些审计事件。后续还需要在自动选择阶段补
+   automatic selection reason、候选集和置信度诊断。
+8. **激活事件与审计日志**：已接入第一版。`skill_activation_decided` 包含
+   skill name、source、触发方式、激活/拒绝决策、`disable_model_invocation`
+   状态和 activation diagnostics 数量；`skill_policy_checked` 包含支持文件
+   kind、label、source label、scope 与 read / inject / execute 决策。
+   后续自动命中落地后，需要把候选排序和低置信度未激活原因也纳入同一审计流。
+9. **组合使用与冲突处理**：已接入第一版。当前运行时明确保持每个 prompt turn
+   只允许一个 active skill；显式组合语法如 `/skill use review,lint ...` 或
+   `/skill use review+lint ...` 会在 prompt 注入前返回 `INPUT_REJECTED`，并发布
+   `skill_composition_decided` public event / run log 审计，包含 requested /
+   known / unknown skill names、触发方式和拒绝原因。后续真正支持多 skill 时，
+   需要在这里补优先级、互斥、顺序、预算分配和冲突解决规则。
 10. **真实 agent 目录回归测试**：补针对 `packages/agent-core/src/cli/agent/skills/`
     下示例 skill 的发现、查看和显式激活测试，防止示例包和 loader 约定漂移。
+
+11. **Sandbox v1**：独立阶段，见阶段 K。先把工具执行和 script 执行共用的
+    execution seam 收口到顶层 `sandbox/` 模块，再让 SkillSupportRuntime script v1 复用。
+12. **SkillSupportRuntime script v1**：依赖阶段 K 的 Sandbox，独立阶段见阶段 L。
 
 工作项：
 
@@ -1911,7 +1944,260 @@ Skill activation v1 之后仍欠缺的能力，先按以下顺序排进后续计
 - `/skill use <name> ...` 会注入 active skill instructions，未知 skill 会失败并
   给出明确诊断。
 
-### 阶段 K：业务能力定义 / Capability Pack
+### 阶段 K：Sandbox v1（virtual + local）
+
+目标：把“文件系统 + 命令执行环境”从 tools 专属的 `ToolOperations` 提升为
+tool / skill script 共用的顶层 `Sandbox` 模块。第一版只做好 local + virtual 两个
+adapter，不追求完整多租户隔离；后续 bubblewrap / Docker / remote sandbox 都只
+作为新 adapter 接入。
+
+状态：已接入第一版。`agent-core` 新增顶层 `sandbox/` 模块，包含统一
+`Sandbox` interface、`VirtualSandbox` 和 `LocalProcessSandbox`。`VirtualSandbox`
+基于现成 `just-bash` 的 `Bash` + `InMemoryFs`，不自研 shell parser；
+`LocalProcessSandbox` 基于 Node `fs/promises` + `child_process.spawn`，提供
+workspace roots path guard、env allowlist、timeout、输出上限和 abort 语义。
+当前 `ToolOperations` 尚未迁移，后续 SkillSupportRuntime script v1 可以先直接依赖
+Sandbox。
+
+当前项目结构判断：
+
+```text
+packages/agent-core/src/tools/operations/
+  type.ts
+  local-tool-operations.ts
+  index.ts
+```
+
+现有 `ToolOperations` 已经包含 `cwd`、`roots`、`resolvePath`、文件读写和
+`execute(command)`，但它位于 `tools/` 下，语义上是 built-in tools 的执行适配层。
+SkillSupportRuntime 如果直接依赖它，会让 skill execution 反向依赖 tools 目录。Sandbox
+阶段应新增顶层模块，而不是把 script 执行塞进 `tools/operations/`。
+
+推荐文件结构：
+
+```text
+packages/agent-core/src/sandbox/
+  types.ts
+  virtual-sandbox.ts
+  local-process-sandbox.ts
+  index.ts
+```
+
+模块职责：
+
+- `sandbox/types.ts`：定义 `Sandbox`、`SandboxKind`、`SandboxExecRequest`、
+  `SandboxExecResult`、`SandboxFileStat` 和通用错误 / rejected 结构。
+- `sandbox/virtual-sandbox.ts`：实现 `createVirtualSandbox()`。直接安装并使用
+  现成 `just-bash`，用 `Bash` + `InMemoryFs` 提供内存文件系统和 bash-like exec；
+  只写 adapter，不自研 bash parser / shell emulator。
+- `sandbox/local-process-sandbox.ts`：实现 `createLocalProcessSandbox()`。基于
+  `node:fs/promises` + `child_process.spawn`，提供真实 workspace 文件系统、
+  env allowlist、timeout、输出上限、process-group abort 和 local-only 风险诊断。
+- `sandbox/index.ts`：统一导出，后续在根 `src/index.ts` 中按 public API 收口策略
+  决定是否导出。
+
+`Sandbox` interface 草案：
+
+```ts
+interface Sandbox {
+  kind: "virtual" | "local";
+  cwd: string;
+  roots: readonly string[];
+  exec(request: SandboxExecRequest): Promise<SandboxExecResult>;
+  readFile(path: string): Promise<string>;
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
+  stat(path: string): Promise<SandboxFileStat>;
+  readdir(path: string): Promise<string[]>;
+  exists(path: string): Promise<boolean>;
+  mkdirp(path: string): Promise<void>;
+  resolvePath(path: string): string;
+}
+
+interface SandboxExecRequest {
+  executable: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+  stdin?: string;
+  outputLimitBytes?: number;
+  signal?: AbortSignal;
+  shell?: boolean;
+}
+```
+
+语义约束：
+
+- 长期接口优先使用 `executable + args`；`shell: true` 只作为 local adapter 的显式
+  兼容模式，不作为 SkillSupportRuntime script v1 的默认路径。
+- 相对路径都相对 sandbox `cwd` 解析；path traversal、绝对路径、symlink 是否允许
+  由 adapter 和 policy 共同决定。
+- `timeoutMs`、输出上限、stdout/stderr 截断、exit code、duration、abort 结果必须
+  结构化返回或结构化拒绝。
+- `VirtualSandbox` 是默认安全选择；当脚本声明需要 native capability 而当前
+  sandbox 是 virtual 时，返回 `rejected`，不要静默升级到 local。
+- `LocalProcessSandbox` 明确不是 security sandbox；它依赖调用环境本身提供隔离，
+  例如本机单用户、CI runner、容器或 VM。
+
+和现有 `ToolOperations` 的迁移关系：
+
+```text
+短期：ToolOperations 继续服务 built-in tools，SkillSupportRuntime 先用 Sandbox。
+中期：ToolOperations 改成 Sandbox adapter 的薄 wrapper，复用 path / exec 语义。
+最终：built-in tools 可以直接依赖 Sandbox，ToolOperations 退出或保留兼容 alias。
+```
+
+工作项：
+
+- 已完成：在 `packages/agent-core/src/sandbox/` 下定义 `Sandbox` interface 和通用
+  结果类型。
+- 已完成：安装 `just-bash` 依赖，并实现 `VirtualSandbox` adapter。
+- 已完成：实现 `LocalProcessSandbox` adapter，复用 cwd / roots / path guard 思路。
+- 已完成：增加 adapter 单元测试，覆盖 path guard、文件读写、timeout、输出截断和
+  env allowlist。
+- 已完成：文档明确 local 不是隔离边界，virtual 不启动真实进程。
+- 待补强：把 abort 行为接入更细的事件审计，并在后续迁移 `ToolOperations` 时复用
+  Sandbox path / exec 语义。
+
+验收：
+
+- `VirtualSandbox` 可以在内存文件系统中读写文件并执行 just-bash 命令。
+- `LocalProcessSandbox` 默认只允许 workspace roots 内路径，env 不默认泄漏 secrets。
+- 两个 adapter 通过同一个 `Sandbox` interface 测试套件。
+- 没有 SkillSupportRuntime 也可以单独验证 Sandbox 模块。
+
+### 阶段 L：SkillSupportRuntime script v1
+
+目标：在 Sandbox v1 之后，新增明确入口 `/skill run <skill-name> <script-name> ...`。
+`/skill use` 仍只负责激活并注入 skill 上下文；`/skill run` 才进入确定性执行路径。
+第一版不做自动执行，也不因命中 skill 就运行脚本。
+
+状态：已接入第一版。`agent-core` 将 skill 支持材料使用收口到
+`SkillSupportRuntime` facade：`read()` 读取 reference/template，
+`renderTemplate()` 渲染 template，`runScript()` 执行 script。CLI 支持
+`/skill run <skill-name> <script-name> ...`。该显式入口不会调用模型，也不会注入
+prompt；它只按 `SkillLoader` 发现的 `scripts/` 支持文件执行确定性脚本，并发布
+public runtime events / run log 审计。`/skill use` 和 `/skill run` 已保持行为分离。
+旧兼容层已移除，脚本执行只保留 `SkillSupportRuntime.runScript()`。
+
+SkillSupportRuntime interface 草案：
+
+```ts
+interface SkillSupportRuntime {
+  read(request: SkillSupportReadRequest): Promise<SkillSupportReadResult>;
+  renderTemplate(request: SkillSupportRenderRequest): Promise<SkillSupportRenderResult>;
+  runScript(request: SkillScriptRunRequest): Promise<SkillScriptRunResult>;
+}
+
+interface SkillScriptRunRequest {
+  skillName: string;
+  scriptName: string;
+  args: string[];
+  namedArgs?: Record<string, unknown>;
+  cwd?: string;
+  sandboxKind?: "virtual" | "local";
+  timeoutMs?: number;
+  outputLimitBytes?: number;
+  signal?: AbortSignal;
+}
+```
+
+执行策略：
+
+- 已完成：只允许运行 SkillLoader 已发现且 support file policy `execute=yes` 的 `scripts/`
+  文件；支持的脚本默认 `execute=yes`，只有脚本 metadata 显式声明 `execute: false`
+  时才关闭执行，并发布 policy audit。
+- 已完成：script path 必须落在 skill 目录内，拒绝绝对路径、`..` path traversal 和
+  symlink。真实读取 / 执行前再次做 canonical path 校验。
+- 已完成：script metadata 可以省略；默认通过文件后缀推断执行策略：
+  `.sh` / `.bash` -> `interpreter: bash` + `sandbox: virtual`，
+  `.js` / `.mjs` / `.cjs` -> `interpreter: node` + `sandbox: local`。
+  `timeout_ms` 默认 `5000`，`output_limit_bytes` 默认 `1048576`。frontmatter 仅用于覆盖
+  默认值或显式声明 `execute: false`。
+- 已完成：local 执行必须来自脚本 metadata 或文件后缀推断出的 `sandbox: local`，且
+  trust / approval 允许时，才使用 `LocalProcessSandbox`。
+- 已完成：脚本参数契约第一版。script frontmatter 支持
+  `arg_<name>: <type> required|optional <description>`，类型支持 `string`、`number`、
+  `boolean`、`string[]`、`number[]`、`boolean[]` 和 `json`。`/skill run` 支持
+  `name=value` 形式的 named args；模型工具 `skill_run_script` 支持 `namedArgs`。
+  runtime 会在执行前做 required / unknown / type coercion 校验，并把结果通过
+  `SKILL_NAMED_ARGS_JSON` 和 `SKILL_INPUT_JSON` 注入脚本，同时保留 `SKILL_ARGS` 和
+  `SKILL_ARGS_JSON` 兼容 positional args。
+- 已完成：脚本结构化结果第一版。stdout 最后一行如果是 JSON envelope，或带
+  `SKILL_RESULT_JSON:` 前缀，会被解析为 `structuredOutput`。推荐格式：
+  `{ "status": "ok", "result": {...}, "logs": [...] }`。
+- 已完成：exit code 语义第一版。`0` -> `succeeded`，`2` ->
+  `invalid_arguments`，timeout -> `timed_out`，其他非零 -> `failed`；
+  `skill_script_completed` 事件带 `outcome` 字段。
+- 已完成：模型工具层已注册 `skill_run_script`。它不会绕过 runtime：工具闭包只做
+  active skill 校验和参数转接，真正执行仍然进入 `SkillSupportRuntime.runScript()`。
+- 待补强：ToolRuntime 后续也应调用同一个 `Sandbox`，但第一版可以先让 SkillSupportRuntime 接入，
+  保留 ToolRuntime 迁移任务，避免一次性改动过大。
+- 待补强：local script approval 现在依赖 execute trust policy 和 `sandbox: local`
+  metadata / 后缀推断；后续应接入更细的用户 approval / tool policy 复用。
+
+审计事件：
+
+- `skill_script_policy_checked`：skill、script、source、sandbox kind、
+  read/inject/execute/policy reason。
+- `skill_script_started`：skill、script、sandbox kind、cwd label、timeout。
+- `skill_script_completed`：exit code、outcome、duration、stdout/stderr 截断摘要。
+- `skill_script_failed`：结构化错误类型、是否 policy 拒绝、是否 sandbox 失败。
+
+验收：
+
+- 已完成：未声明 metadata 的 `.sh` / `.js` script 会按后缀默认执行；显式
+  `execute: false` 的 script 会被拒绝，并进入 run log / public event 审计。
+- 已完成：`/skill run <skill> <script> ...` 不调用模型，按 policy 选择 virtual / local
+  sandbox 并返回结构化执行结果。
+- 已完成：local script 只有脚本 metadata 或后缀推断为 local 时才能执行，且 env 不会
+  默认泄漏 secrets。
+- 已完成：timeout、输出截断、非零 exit code、spawn failure 都有稳定执行结果；
+  当前测试覆盖 policy rejection、virtual success、local explicit declaration 和 env
+  allowlist。
+- 已完成：named args contract、required 参数缺失、结构化 result envelope 和
+  exit code `2` -> `invalid_arguments` 有单元测试覆盖。
+- 已完成：`/skill use` 与 `/skill run` 行为分离：前者不执行脚本，后者不默认调用模型。
+
+### 阶段 L+：Skill model tools / 自动按需使用
+
+目标：让模型在看到 active skill 的 `<available_support_files>` manifest 后，可以自动决定
+是否 read / render / run，而不是只能由用户手动输入 CLI 命令。
+
+状态：已接入第一版。启动时注册三个通用 skill tools：
+
+- `skill_read_support_file` -> `SkillSupportRuntime.read()`
+- `skill_render_template` -> `SkillSupportRuntime.renderTemplate()`
+- `skill_run_script` -> `SkillSupportRuntime.runScript()`
+
+当前不动态重建 `ToolRegistry`。registry 仍是启动时注入的工具仓库；动态部分发生在
+每个 prompt turn 的 context 装配之后：`RuntimeAssembler.resolveTurnTools()` 根据
+`TurnContext.metadata.turn.skillActivation` 和 active skill manifest 生成本轮 tools
+override，`AgentLoop.prompt()` 只在本次模型调用期间替换工具集合，调用结束后恢复原
+session tools。第一版采用“静态 registry + per-turn tools override + runtime gated”：
+
+- `/skill use <name>` 在本轮 context 装配时更新 active skill holder。
+- 没有 active skill 时，本轮不会向模型暴露 `skill_*` tools。
+- 有 active skill 时，按 manifest policy 暴露工具：存在 `read=yes` 支持文件时暴露
+  `skill_read_support_file`；存在可读 template 时暴露 `skill_render_template`；存在
+  `execute=yes` script 时暴露 `skill_run_script`。
+- active skill 注入消息中额外包含 `<support_file_tools>`，把 manifest 可用能力和工具名
+  显式对应起来，帮助模型判断何时 read / render / run。
+- skill tools 执行时仍先校验 `skillName` 是否为当前 active skill。
+- 然后继续校验 support file 是否存在、是否属于该 skill、trust policy 是否允许。
+- read/render/run 结果作为 tool result 回到同一轮模型上下文。
+
+后续补强：
+
+- 将 active skill holder 从 CLI 单会话实现提升为 session-scoped runtime context，
+  避免不同 composition root 需要自己管理 holder。
+- 把 per-turn tools override 的 diagnostics 公开出来，例如本轮为什么暴露/隐藏某个
+  skill tool。
+- 为 read/render 增加 public event / run log 审计，和 script 审计事件保持一致。
+- 为 `skill_run_script` 增加更细的自动执行策略，例如脚本显式允许 auto-run、本地执行
+  approval、输出回流策略和 artifact 保存。
+
+### 阶段 M：业务能力定义 / Capability Pack
 
 目标：在 core 核心能力稳定后，再抽象业务能力的装配模型。
 
@@ -1929,7 +2215,7 @@ Skill activation v1 之后仍欠缺的能力，先按以下顺序排进后续计
 - 多个 pack 的工具、资源、hook、policy 可以组合。
 - core 不内置具体业务场景逻辑。
 
-### 阶段 L：Public API 与命名收口
+### 阶段 N：Public API 与命名收口
 
 目标：从开发期内部导出收束到稳定 SDK surface。
 
@@ -1966,6 +2252,8 @@ Runtime/Lifecycle v1 小收尾
   -> File-backed Memory v1
   -> Policies
   -> Prompt Template / Skill 激活入口
+  -> Sandbox v1（virtual + local）
+  -> SkillSupportRuntime script v1
   -> Capability Pack
   -> Public API 收口
 ```

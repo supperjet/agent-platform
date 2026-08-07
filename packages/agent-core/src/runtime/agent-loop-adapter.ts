@@ -55,14 +55,21 @@ export class AgentLoopAdapter implements AgentLoop {
   async prompt(message: AgentMessage | AgentMessage[], options: AgentLoopPromptOptions = {}): Promise<void> {
     // prompt 会启动一次底层 agent 执行。systemPrompt override 只作用于本次 run。
     const previousSystemPrompt = this.agent.state.systemPrompt;
+    const previousTools = this.agent.state.tools;
     if (options.systemPrompt !== undefined) {
       this.agent.state.systemPrompt = options.systemPrompt;
+    }
+    if (options.tools !== undefined) {
+      this.agent.state.tools = [...options.tools];
     }
     try {
       await this.agent.prompt(message);
     } finally {
       if (options.systemPrompt !== undefined) {
         this.agent.state.systemPrompt = previousSystemPrompt;
+      }
+      if (options.tools !== undefined) {
+        this.agent.state.tools = previousTools;
       }
     }
   }

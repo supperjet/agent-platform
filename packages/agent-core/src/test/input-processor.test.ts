@@ -213,6 +213,17 @@ test("InputProcessor activates skill metadata from slash input", async () => {
           arguments: "src/runtime.ts",
           sourceInfo: { source: "sdk", label: "test", scope: "explicit" },
         },
+        skillActivationAudit: {
+          skillName: "review",
+          sourceLabel: "test",
+          sourceScope: "explicit",
+          decision: "activated",
+          selectionReason: "explicit_command",
+          reason: "Skill activated by explicit /skill use command.",
+          disableModelInvocation: false,
+          diagnosticCount: 0,
+          supportFilePolicies: [],
+        },
         args: {
           raw: "use review src/runtime.ts",
           skillName: "review",
@@ -252,8 +263,88 @@ test("InputProcessor rejects model-disabled skills before prompt activation", as
         errorCode: "INPUT_REJECTED",
         message: [
           'Skill "export-snapshot" declares disable_model_invocation: true.',
-          "It cannot be executed through prompt injection until SkillRuntime is available.",
+          "It cannot be executed through prompt injection; use /skill run for deterministic script execution.",
         ].join(" "),
+      },
+      metadata: {
+        slashCommand: "skill",
+        inputMode: "skill",
+        selectedSkill: "export-snapshot",
+        skillActivationAudit: {
+          skillName: "export-snapshot",
+          sourceLabel: "test",
+          sourceScope: "explicit",
+          decision: "rejected",
+          selectionReason: "explicit_command",
+          reason: "Skill declares disable_model_invocation: true; use /skill run for deterministic script execution.",
+          disableModelInvocation: true,
+          diagnosticCount: 0,
+          supportFilePolicies: [],
+        },
+        args: {
+          raw: "use export-snapshot",
+          skillName: "export-snapshot",
+        },
+      },
+    },
+  );
+});
+
+test("InputProcessor rejects explicit multi-skill composition before prompt activation", async () => {
+  const registry = createSkillRegistry([
+    defineSkill({
+      name: "review",
+      label: "Review",
+      instructions: "Review code.",
+      sourceInfo: { source: "sdk", label: "review-test", scope: "explicit" },
+      supportFiles: [],
+      priority: 100,
+      loadedAt: "2026-08-03T00:00:00.000Z",
+    }),
+    defineSkill({
+      name: "lint",
+      label: "Lint",
+      instructions: "Lint code.",
+      sourceInfo: { source: "sdk", label: "lint-test", scope: "explicit" },
+      supportFiles: [],
+      priority: 100,
+      loadedAt: "2026-08-03T00:00:00.000Z",
+    }),
+  ]);
+  const processor = new InputProcessor({
+    skillRegistry: registry,
+  });
+
+  assert.deepEqual(
+    await processor.process({
+      command: { type: "prompt", text: "/skill use review,lint target=src" },
+    }),
+    {
+      status: "rejected",
+      outcome: {
+        status: "failed",
+        errorCode: "INPUT_REJECTED",
+        message: [
+          "Multiple skill activation is not supported yet: review, lint.",
+          "Use one /skill use command per turn.",
+        ].join(" "),
+      },
+      metadata: {
+        slashCommand: "skill",
+        inputMode: "skill",
+        skillCompositionAudit: {
+          requestedSkillNames: ["review", "lint"],
+          knownSkillNames: ["review", "lint"],
+          unknownSkillNames: [],
+          decision: "rejected",
+          selectionReason: "explicit_command",
+          reason: "Multiple skill activation is not supported yet; v1 allows one active skill per prompt turn.",
+        },
+        args: {
+          raw: "use review,lint target=src",
+          skillNames: ["review", "lint"],
+          knownSkillNames: ["review", "lint"],
+        },
       },
     },
   );

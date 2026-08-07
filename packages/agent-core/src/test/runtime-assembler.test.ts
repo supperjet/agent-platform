@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { registerFauxProvider, Type } from "@earendil-works/pi-ai";
+import type { TurnContext } from "../context/context-assembler.js";
+import { ContextBudget } from "../context/context-budget.js";
 import type { ConversationEntry } from "../conversation/conversation-entry.js";
 import { exportConversationEntriesState } from "../conversation/conversation-state.js";
 import { formatAgentDefinition } from "../definition/agent-definition.js";
@@ -210,6 +212,54 @@ test("wraps assembled tools with ToolRuntime lifecycle hooks", async () => {
     assert.deepEqual(calls, [
       "before:tool:inspect:session-assembly-tool-runtime:assembly-tool-runtime-agent",
       "after:succeeded"
+    ]);
+  } finally {
+    registration.unregister();
+  }
+});
+
+test("resolves per-turn tools through catalog and ToolRuntime wrappers", async () => {
+  const registration = registerFauxProvider({ provider: "runtime-assembler-turn-tools-test" });
+  const inspectTool = createInspectTool();
+  const calls: string[] = [];
+  const assembler = new RuntimeAssembler({
+    toolRegistry: createAgentToolRegistry([inspectTool]),
+    resolveTurnToolNames: ({ context, baseToolNames }) =>
+      context.metadata.turn?.enableInspect === true
+        ? [...baseToolNames, "inspect_runtime"]
+        : baseToolNames,
+    services: {
+      lifecycleHooks: {
+        beforeToolCall: [({ toolCallId, context }) => {
+          calls.push(`before:${toolCallId}:${context?.sessionId}:${context?.definitionId}`);
+        }],
+        afterToolCall: [({ status }) => {
+          calls.push(`after:${status}`);
+        }],
+      },
+    },
+  });
+
+  try {
+    const assembly = assembler.assemble({
+      sessionId: "session-assembly-turn-tools",
+      definition: formatAgentDefinition({
+        id: "assembly-turn-tools-agent",
+        model: registration.getModel(),
+        instructions: ["Inspect when enabled."],
+        toolNames: [],
+      }),
+      resolveApiKey: () => "core-only-key",
+    });
+    const turnTools = assembly.resolveTurnTools?.(createTurnContext({ enableInspect: true })) ?? [];
+    const result = await turnTools[0]?.execute("tool:turn-inspect", { topic: "runtime" });
+
+    assert.deepEqual(assembly.tools.map((tool) => tool.name), []);
+    assert.deepEqual(turnTools.map((tool) => tool.name), ["inspect_runtime"]);
+    assert.equal(readToolResultText(result), "Inspected runtime.");
+    assert.deepEqual(calls, [
+      "before:tool:turn-inspect:session-assembly-turn-tools:assembly-turn-tools-agent",
+      "after:succeeded",
     ]);
   } finally {
     registration.unregister();
@@ -503,6 +553,28 @@ function readToolResultText(result: unknown): string {
     if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text") return [];
     return "text" in block && typeof block.text === "string" ? [block.text] : [];
   }).join("\n");
+}
+
+function createTurnContext(turn?: Record<string, unknown>): TurnContext {
+  const budget = new ContextBudget().estimate([]);
+  return {
+    systemPrompt: "system",
+    promptMessages: [],
+    persistentPromptMessageIndexes: [],
+    transientPromptMessageIndexes: [],
+    conversationMessageCount: 0,
+    messages: [],
+    metadata: {
+      ...(turn ? { turn } : {}),
+      budget,
+      diagnostics: {
+        budget,
+        injectedSources: [],
+        persistentPromptMessageCount: 0,
+        transientPromptMessageCount: 0,
+      },
+    },
+  };
 }
 
 function createRuntimeNotesResource(): AgentResourceDefinition {

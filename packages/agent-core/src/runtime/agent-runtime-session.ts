@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
   AgentRuntime,
   type AgentConversationState,
@@ -59,6 +59,8 @@ export type AgentRuntimeSessionOptions = {
   promptTemplateRegistry?: PromptTemplateRegistry;
   /** 可选 skill registry；用于在输入阶段激活 `/skill use <name> ...`。 */
   skillRegistry?: SkillRegistry;
+  /** 根据本轮 context 动态解析工具集合。 */
+  resolveTurnTools?: (context: TurnContext) => readonly AgentTool[] | undefined;
 };
 
 /**
@@ -235,6 +237,7 @@ export class AgentRuntimeSession extends AgentRuntime {
       },
       ...(this.lifecycleRunner ? { lifecycleRunner: this.lifecycleRunner } : {}),
       ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+      ...(options.resolveTurnTools ? { resolveTurnTools: options.resolveTurnTools } : {}),
     });
 
     // 订阅底层 loop 事件。事件先进入 RuntimeSession 的 FIFO，因为 afterMessage
@@ -259,9 +262,17 @@ export class AgentRuntimeSession extends AgentRuntime {
     if (command.type === "compact") {
       return this.runManualCompaction(command);
     }
+    if (command.type === "skill_run") {
+      return {
+        status: "failed",
+        errorCode: "INPUT_REJECTED",
+        message: "Skill scripts must be executed through SkillSupportRuntime, not AgentRuntimeSession.execute().",
+      };
+    }
     // onInput/基础 slash metadata 解析先于排队执行。这样 `/state`、`/context`、
     // `/reload` 等未来 handled input 可以立即返回，不会排在长时间 prompt 后面。
     const processedInput = await this.inputProcessor.process({ command });
+    this.publishSkillAuditEvents(processedInput);
     if (processedInput.status === "handled") {
       return { status: "succeeded" };
     }
@@ -269,6 +280,45 @@ export class AgentRuntimeSession extends AgentRuntime {
       return processedInput.outcome;
     }
     return this.scheduleProcessedInput(processedInput);
+  }
+
+  private publishSkillAuditEvents(processedInput: ProcessedInput) {
+    if (processedInput.status === "handled") return;
+    const compositionAudit = processedInput.metadata?.skillCompositionAudit;
+    if (compositionAudit) {
+      this.eventHub.publishRuntimeEvent({
+        type: "skill_composition_decided",
+        sessionId: this.sessionId,
+        requestedSkillNames: [...compositionAudit.requestedSkillNames],
+        knownSkillNames: [...compositionAudit.knownSkillNames],
+        unknownSkillNames: [...compositionAudit.unknownSkillNames],
+        decision: compositionAudit.decision,
+        selectionReason: compositionAudit.selectionReason,
+        reason: compositionAudit.reason,
+      });
+    }
+    const audit = processedInput.metadata?.skillActivationAudit;
+    if (!audit) return;
+    this.eventHub.publishRuntimeEvent({
+      type: "skill_activation_decided",
+      sessionId: this.sessionId,
+      skillName: audit.skillName,
+      sourceLabel: audit.sourceLabel,
+      sourceScope: audit.sourceScope,
+      decision: audit.decision,
+      selectionReason: audit.selectionReason,
+      reason: audit.reason,
+      disableModelInvocation: audit.disableModelInvocation,
+      diagnosticCount: audit.diagnosticCount,
+    });
+    for (const policy of audit.supportFilePolicies) {
+      this.eventHub.publishRuntimeEvent({
+        type: "skill_policy_checked",
+        sessionId: this.sessionId,
+        skillName: audit.skillName,
+        policy,
+      });
+    }
   }
 
   /** 读取面向调用方的轻量 runtime 快照。 */

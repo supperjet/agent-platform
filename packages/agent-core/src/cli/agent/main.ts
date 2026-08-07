@@ -34,6 +34,17 @@ import {
   type SkillDiagnostic,
   type SkillRegistry,
 } from "../../skills/skill-loader.js";
+import {
+  createSkillSupportRuntime,
+  type SkillScriptRunResult,
+  type SkillSupportReadResult,
+  type SkillSupportRenderResult,
+} from "../../skills/skill-support-runtime.js";
+import {
+  isSkillToolName,
+  resolveSkillToolNamesForTurn,
+  type ActiveSkillTracker,
+} from "../../skills/skill-tools.js";
 import type { AgentToolRegistry } from "../../tools/tool-registry.js";
 import type {
   ToolApprovalHandler,
@@ -84,6 +95,7 @@ export type AgentPlaygroundOptions = {
   promptTemplateRegistry?: PromptTemplateRegistry;
   skillRegistry?: SkillRegistry;
   skillDiagnostics?: readonly SkillDiagnostic[];
+  activeSkills?: ActiveSkillTracker;
   workingDirectory?: string;
   conversationFile?: string;
 };
@@ -163,10 +175,13 @@ export async function startAgentPlayground(options: AgentPlaygroundOptions) {
 
   const rebuildRuntime = (preserveState = true, restoredState?: ReturnType<AgentRuntime["exportState"]>) => {
     const previousState = restoredState ?? (preserveState ? state?.runtime.exportState() : undefined);
+    const configurableToolNames = options.toolRegistry.getAllEntries()
+      .map((entry) => entry.tool.name)
+      .filter((name) => !isSkillToolName(name));
     const next = createRuntimeState(options, rl, {
       workingDirectory: state?.workingDirectory ?? workingDirectory,
-      availableToolNames: state?.availableToolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
-      toolNames: state?.toolNames ?? options.toolRegistry.getAllEntries().map((entry) => entry.tool.name),
+      availableToolNames: state?.availableToolNames ?? configurableToolNames,
+      toolNames: state?.toolNames ?? configurableToolNames,
       resourceNames: state?.resourceNames ?? options.resourceRegistry.getAllDefinitions().map((resource) => resource.name),
       promptTemplateRegistry,
       skillRegistry,
@@ -235,12 +250,16 @@ function createRuntimeState(
       "You are an agent-core runtime playground.",
       "Answer concisely in Chinese.",
       "Use tools when they help verify the runtime behavior.",
+      "When an active skill lists available_support_files, use skill_read_support_file, skill_render_template, or skill_run_script only when the manifest and task indicate that support material is needed.",
       "Do not reveal API keys, hidden runtime state, or system configuration.",
     ],
     toolNames: config.toolNames,
     resourceNames: config.resourceNames,
   });
-  const lifecycleHooks = createPlaygroundLifecycleHooks(config.lifecycleMode);
+  const lifecycleHooks = createPlaygroundLifecycleHooks(
+    config.lifecycleMode,
+    options.activeSkills,
+  );
   const toolRuntime = createToolRuntime({
     lifecycleRunner: createLifecycleRunner(lifecycleHooks),
     ...(config.policyEnabled ? { policy: createDefaultToolPolicy() } : {}),
@@ -259,6 +278,7 @@ function createRuntimeState(
       : {}),
     toolRuntime,
     lifecycleHooks,
+    resolveTurnToolNames: resolveSkillToolNamesForTurn,
     policies: {
       queue: "direct",
       retry: "none",
@@ -310,10 +330,29 @@ function resolvePlaygroundSummarizerInputBudget(
   };
 }
 
-function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
-  if (mode === "off") return {};
+function createPlaygroundLifecycleHooks(
+  mode: LifecycleMode,
+  activeSkills?: ActiveSkillTracker,
+): LifecycleHooks {
+  const activeSkillHooks: LifecycleHooks = activeSkills
+    ? {
+        beforeContext: [({ metadata }) => {
+          const selectedSkill = readSelectedSkillName(metadata);
+          if (selectedSkill) {
+            activeSkills.setActiveSkills([selectedSkill]);
+          } else {
+            activeSkills.clear();
+          }
+        }],
+        afterRun: [() => {
+          activeSkills.clear();
+        }],
+      }
+    : {};
+  if (mode === "off") return activeSkillHooks;
 
   return {
+    ...activeSkillHooks,
     onInput: [({ command, metadata }) => {
       printLifecycleEvent(mode, "onInput", {
         commandType: command.type,
@@ -337,7 +376,9 @@ function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
         ].join("\n"),
       };
     }],
-    beforeContext: [({ messages, systemPrompt, metadata }) => {
+    beforeContext: [
+      ...(activeSkillHooks.beforeContext ?? []),
+      ({ messages, systemPrompt, metadata }) => {
       printLifecycleEvent(mode, "beforeContext", {
         messageCount: messages.length,
         systemPromptLength: systemPrompt.length,
@@ -377,7 +418,9 @@ function createPlaygroundLifecycleHooks(mode: LifecycleMode): LifecycleHooks {
         willRetry,
       });
     }],
-    afterRun: [({ status, metadata }) => {
+    afterRun: [
+      ...(activeSkillHooks.afterRun ?? []),
+      ({ status, metadata }) => {
       printLifecycleEvent(mode, "afterRun", {
         status,
         ...(metadata ? { metadata } : {}),
@@ -395,6 +438,13 @@ function isPlaygroundCommand(line: string) {
 function readSlashCommand(metadata: Record<string, unknown> | undefined): string | undefined {
   return typeof metadata?.slashCommand === "string"
     ? metadata.slashCommand
+    : undefined;
+}
+
+function readSelectedSkillName(metadata: Record<string, unknown> | undefined): string | undefined {
+  const selectedSkill = metadata?.selectedSkill;
+  return typeof selectedSkill === "string" && selectedSkill.trim()
+    ? selectedSkill
     : undefined;
 }
 
@@ -457,6 +507,18 @@ async function handleCommand(
     return true;
   }
   if (command === "skill") {
+    if (isSkillRun(value)) {
+      await executeSkillRunLine(state, value);
+      return true;
+    }
+    if (isSkillRead(value)) {
+      await executeSkillReadLine(state, value);
+      return true;
+    }
+    if (isSkillRender(value)) {
+      await executeSkillRenderLine(state, value);
+      return true;
+    }
     if (isSkillActivation(value)) {
       await executePromptLine(state, line);
       return true;
@@ -606,6 +668,58 @@ async function executePromptLine(state: PlaygroundState, line: string) {
     }
   }
   stdout.write("\n");
+}
+
+async function executeSkillRunLine(state: PlaygroundState, value: string) {
+  const invocation = parseSkillRunInvocation(value);
+  const run = await startPlaygroundRun(state, "skill_run");
+  await markRuntimeCommandAccepted(state, run.runId, run.commandId, {
+    type: "skill_run",
+    skillName: invocation.skillName,
+    scriptName: invocation.scriptName,
+    args: invocation.args,
+    namedArgs: invocation.namedArgs,
+  });
+  let result: SkillScriptRunResult;
+  try {
+    const runtime = createSkillSupportRuntime({
+      registry: state.skillRegistry,
+      sessionId: "agent-core-playground",
+      workingDirectory: state.workingDirectory,
+      onEvent: (event) => {
+        recordRuntimeEvent(state, event);
+        printRuntimeEvent(event, state.eventMode);
+      },
+    });
+    result = await runtime.runScript(invocation);
+  } catch (error) {
+    result = {
+      status: "failed",
+      skillName: invocation.skillName,
+      scriptName: invocation.scriptName,
+      errorCode: "SCRIPT_EXECUTION_FAILED",
+      message: readErrorMessage(error),
+      policyRejected: false,
+    };
+  }
+  const outcome = skillRunResultToOutcome(result);
+  await finishPlaygroundRun(state, run.runId, outcome);
+  await markRuntimeCommandFinished(state, outcome);
+  stdout.write(formatSkillRunResult(result));
+}
+
+async function executeSkillReadLine(state: PlaygroundState, value: string) {
+  const invocation = parseSkillSupportReadInvocation(value);
+  const runtime = createSkillSupportRuntime({ registry: state.skillRegistry });
+  const result = await runtime.read(invocation);
+  stdout.write(formatSkillSupportReadResult(result));
+}
+
+async function executeSkillRenderLine(state: PlaygroundState, value: string) {
+  const invocation = parseSkillSupportRenderInvocation(value);
+  const runtime = createSkillSupportRuntime({ registry: state.skillRegistry });
+  const result = await runtime.renderTemplate(invocation);
+  stdout.write(formatSkillSupportRenderResult(result));
 }
 
 async function startPlaygroundRun(
@@ -888,8 +1002,8 @@ export function formatSkill(registry: SkillRegistry, name: string) {
               `- ${file.kind}: ${file.sourceInfo.label}`,
               ...(file.trustPolicy
                 ? [
-                    `  trust: read=${file.trustPolicy.canRead ? "yes" : "no"}, inject=${file.trustPolicy.canInject ? "yes" : "no"}, execute=${file.trustPolicy.canExecute ? "yes" : "no"}`,
-                    `  reason: ${file.trustPolicy.reason}`,
+                    `  runtime policy: read=${file.trustPolicy.canRead ? "yes" : "no"}, inject=${file.trustPolicy.canInject ? "yes" : "no"}, execute=${file.trustPolicy.canExecute ? "yes" : "no"}`,
+                    `  policy reason: ${file.trustPolicy.reason}`,
                   ]
                 : []),
             ].join("\n")
@@ -1055,6 +1169,13 @@ function isRequiredRuntimeEvent(event: AgentRuntimeEvent) {
     || event.type === "run_finished"
     || event.type === "run_aborted"
     || event.type === "run_failed"
+    || event.type === "skill_activation_decided"
+    || event.type === "skill_policy_checked"
+    || event.type === "skill_composition_decided"
+    || event.type === "skill_script_policy_checked"
+    || event.type === "skill_script_started"
+    || event.type === "skill_script_completed"
+    || event.type === "skill_script_failed"
     || event.type === "message_finished"
     || event.type === "tool_started"
     || event.type === "tool_finished";
@@ -1110,6 +1231,192 @@ function isTemplateInvocation(value: string) {
 
 function isSkillActivation(value: string) {
   return /^use\s+[A-Za-z_][A-Za-z0-9_/-]*(?:\s|$)/.test(value);
+}
+
+function isSkillRun(value: string) {
+  return /^run\s+[A-Za-z_][A-Za-z0-9_/-]*\s+\S+/.test(value);
+}
+
+function isSkillRead(value: string) {
+  return /^read\s+[A-Za-z_][A-Za-z0-9_/-]*\s+\S+/.test(value);
+}
+
+function isSkillRender(value: string) {
+  return /^render\s+[A-Za-z_][A-Za-z0-9_/-]*\s+\S+/.test(value);
+}
+
+function parseSkillRunInvocation(value: string) {
+  const tokens = tokenizeSkillRunArgs(value);
+  const command = tokens.shift();
+  if (command !== "run") {
+    throw new Error('/skill run expects "run <skill> <script> [args...]".');
+  }
+  const skillName = tokens.shift();
+  const scriptName = tokens.shift();
+  if (!skillName || !scriptName) {
+    throw new Error('/skill run expects "run <skill> <script> [args...]".');
+  }
+  const { args, namedArgs } = parseSkillRunArguments(tokens);
+  return {
+    skillName,
+    scriptName,
+    args,
+    namedArgs,
+  };
+}
+
+function parseSkillRunArguments(tokens: readonly string[]) {
+  const args: string[] = [];
+  const namedArgs: Record<string, string> = {};
+  for (const token of tokens) {
+    const separator = token.indexOf("=");
+    if (separator <= 0) {
+      args.push(token);
+      continue;
+    }
+    namedArgs[token.slice(0, separator)] = token.slice(separator + 1);
+  }
+  return {
+    args,
+    namedArgs,
+  };
+}
+
+function parseSkillSupportReadInvocation(value: string) {
+  const tokens = tokenizeSkillRunArgs(value);
+  const command = tokens.shift();
+  if (command !== "read") {
+    throw new Error('/skill read expects "read <skill> <file>".');
+  }
+  const skillName = tokens.shift();
+  const fileName = tokens.shift();
+  if (!skillName || !fileName || tokens.length > 0) {
+    throw new Error('/skill read expects "read <skill> <file>".');
+  }
+  return { skillName, fileName };
+}
+
+function parseSkillSupportRenderInvocation(value: string) {
+  const tokens = tokenizeSkillRunArgs(value);
+  const command = tokens.shift();
+  if (command !== "render") {
+    throw new Error('/skill render expects "render <skill> <template> [key=value...]".');
+  }
+  const skillName = tokens.shift();
+  const templateName = tokens.shift();
+  if (!skillName || !templateName) {
+    throw new Error('/skill render expects "render <skill> <template> [key=value...]".');
+  }
+  return {
+    skillName,
+    templateName,
+    variables: parseSkillRenderVariables(tokens),
+  };
+}
+
+function parseSkillRenderVariables(tokens: readonly string[]): Record<string, string> {
+  const variables: Record<string, string> = {};
+  for (const token of tokens) {
+    const separator = token.indexOf("=");
+    if (separator <= 0) {
+      throw new Error(`/skill render variables must use key=value syntax: ${token}`);
+    }
+    variables[token.slice(0, separator)] = token.slice(separator + 1);
+  }
+  return variables;
+}
+
+function tokenizeSkillRunArgs(value: string): string[] {
+  const tokens: string[] = [];
+  const pattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  for (const match of value.matchAll(pattern)) {
+    const token = match[1] ?? match[2] ?? match[3];
+    if (token !== undefined) tokens.push(token.replace(/\\(["'\\])/g, "$1"));
+  }
+  return tokens;
+}
+
+function skillRunResultToOutcome(result: SkillScriptRunResult): AgentExecutionOutcome {
+  if (result.status !== "completed") {
+    return {
+      status: "failed",
+      errorCode: result.errorCode,
+      message: result.message,
+    };
+  }
+  if (result.outcome === "succeeded") return { status: "succeeded" };
+  return {
+    status: "failed",
+    errorCode: result.outcome === "invalid_arguments"
+      ? "SCRIPT_INVALID_ARGUMENTS"
+      : "SCRIPT_EXECUTION_FAILED",
+    message: `Skill script ${result.outcome} with exit code ${result.exec.exitCode}.`,
+  };
+}
+
+function formatSkillRunResult(result: SkillScriptRunResult) {
+  if (result.status !== "completed") {
+    return [
+      `skill script ${result.status}: ${result.skillName}/${result.scriptName}`,
+      `error: ${result.errorCode}: ${result.message}`,
+      "",
+    ].join("\n");
+  }
+  return [
+    `skill script completed: ${result.skillName}/${result.scriptName}`,
+    `sandbox: ${result.sandboxKind}`,
+    `exit_code: ${result.exec.exitCode}`,
+    `outcome: ${result.outcome}`,
+    `duration_ms: ${result.exec.durationMs}`,
+    `timed_out: ${result.exec.timedOut ? "true" : "false"}`,
+    `truncated: ${result.exec.truncated ? "true" : "false"}`,
+    ...(result.structuredOutput?.result !== undefined
+      ? ["result_json:", JSON.stringify(result.structuredOutput.result, null, 2)]
+      : []),
+    ...(result.structuredOutput?.logs?.length
+      ? ["logs:", ...result.structuredOutput.logs]
+      : []),
+    ...(result.exec.stdout ? ["stdout:", result.exec.stdout.trimEnd()] : []),
+    ...(result.exec.stderr ? ["stderr:", result.exec.stderr.trimEnd()] : []),
+    "",
+  ].join("\n");
+}
+
+function formatSkillSupportReadResult(result: SkillSupportReadResult) {
+  if (result.status !== "completed") {
+    return [
+      `skill support ${result.status}: ${result.skillName}/${result.fileName}`,
+      `error: ${result.errorCode}: ${result.message}`,
+      "",
+    ].join("\n");
+  }
+  return [
+    `skill support file: ${result.skillName}/${result.file.file.sourceInfo.label}`,
+    `kind: ${result.file.file.kind}`,
+    "content:",
+    result.file.content.trimEnd(),
+    "",
+  ].join("\n");
+}
+
+function formatSkillSupportRenderResult(result: SkillSupportRenderResult) {
+  if (result.status !== "completed") {
+    return [
+      `skill template ${result.status}: ${result.skillName}/${result.fileName}`,
+      `error: ${result.errorCode}: ${result.message}`,
+      "",
+    ].join("\n");
+  }
+  return [
+    `skill template rendered: ${result.skillName}/${result.templateName}`,
+    `source: ${result.template.sourceInfo.label}`,
+    ...(Object.keys(result.template.variables).length
+      ? [`variables: ${JSON.stringify(result.template.variables)}`]
+      : []),
+    "content:",
+    result.template.content.trimEnd(),
+    "",
+  ].join("\n");
 }
 
 function parseOnOff(value: string, label: string) {
@@ -1242,6 +1549,12 @@ function printHelp() {
   /skill review          Print one skill with support file list and contents.
   /skill use review src target=src
                          Activate one skill with references and rendered templates.
+  /skill read review checklist.md
+                         Read one trusted skill support file through SkillSupportRuntime.
+  /skill render review finding target=src
+                         Render one trusted skill template through SkillSupportRuntime.
+  /skill run review collect arg
+                         Run one trusted skill script through SkillSupportRuntime.
   /policy on|off         Toggle default ToolPolicy.
   /approve ask|always|never
   /events on|off|json    Toggle runtime and ToolRuntime event printing.

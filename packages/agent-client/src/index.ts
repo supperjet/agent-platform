@@ -10,6 +10,9 @@ export type AgentEvent = (
   | { type: "tool_started"; sessionId: string; toolCallId: string; toolName: string; args: unknown }
   | { type: "tool_progress"; sessionId: string; toolCallId: string; text: string }
   | { type: "tool_finished"; sessionId: string; toolCallId: string; isError: boolean; text: string; sourceIds: string[] }
+  | { type: "skill_activation_decided"; sessionId: string; skillName: string; sourceLabel: string; sourceScope: "global" | "project" | "workspace" | "explicit"; decision: "activated" | "rejected"; selectionReason: "explicit_command" | "automatic"; reason: string; disableModelInvocation: boolean; diagnosticCount: number }
+  | { type: "skill_policy_checked"; sessionId: string; skillName: string; policy: { kind: "reference" | "template" | "script"; label: string; sourceLabel: string; sourceScope: "global" | "project" | "workspace" | "explicit"; canRead: boolean; canInject: boolean; canExecute: boolean; reason: string } }
+  | { type: "skill_composition_decided"; sessionId: string; requestedSkillNames: string[]; knownSkillNames: string[]; unknownSkillNames: string[]; decision: "rejected"; selectionReason: "explicit_command" | "automatic"; reason: string }
 ) & { receivedAt?: string };
 
 export type AgentMessage = {

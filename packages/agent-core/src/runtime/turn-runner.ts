@@ -9,6 +9,7 @@ import { InputProcessor } from "../prompt/input-processor.js";
 import type { ProcessedInput } from "../prompt/input-processor.js";
 import type { AgentLoop } from "./agent-loop.js";
 import { createUserMessage } from "./messages.js";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 /**
  * TurnRunner 运行一个命令所需的依赖。
@@ -49,6 +50,8 @@ export type TurnRunnerOptions = {
   contextAssembler?: ContextAssembler;
   /** 当前 session 的 base system prompt，传给 beforeRun / beforeContext。 */
   systemPrompt?: string;
+  /** 根据已组装的本轮上下文返回仅本轮可用的工具集合。 */
+  resolveTurnTools?: (context: TurnContext) => readonly AgentTool[] | undefined;
 };
 
 /**
@@ -144,10 +147,12 @@ export class TurnRunner {
         if (turnContext.metadata.hooks) {
           afterRunMetadata = turnContext.metadata.hooks;
         }
+        const turnTools = this.options.resolveTurnTools?.(turnContext);
         // promptMessages 可能包含 lifecycle 注入的 transient context message。
         // 是否清理这些 transient message 由 afterLoopIdle 回调负责。
         await this.options.loop.prompt(turnContext.promptMessages, {
           systemPrompt: turnContext.systemPrompt,
+          ...(turnTools ? { tools: turnTools } : {}),
         });
         // waitForIdle 是 prompt turn 的分界点：此时底层 loop 已经停止流式输出，
         // 但公共事件和 exported state 还没有完全收尾。
